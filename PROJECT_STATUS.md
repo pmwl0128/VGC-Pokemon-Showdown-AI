@@ -1,5 +1,34 @@
 # VGC Bot Project Status
 
+## Resumed for the vgczero session: arm 7's test played (the planned start line stands), and the long run's merged tree checked independently (2026-October 21, 00:40)
+
+- The user resumed the paused work on 10-20 at about 23:50 ("back at it, help out the other
+  context if it needs"; the rented machine was destroyed on 10-12 at 09:18 with all seven pilot
+  arms on the laptop). No code of this repository changed; nothing here touches the ladder or the
+  deployed bot. Files in `~/vgczero-peer/` (`pilot_h2h/`, `pilot_arms/`, `merge_verify/`).
+- **Arm 7's test** (the head with 1.5e-4 against the head at 3e-4 after the same training hours;
+  the rule and the copies were written down on 10-12 before any of these games): 51.24% at 1.35 h
+  and 51.90% at 1.6 h, both under the 52% line, so **the planned start line stands**
+  (`--aux-opp-action true --lr 3e-4 --lr-horizon 18000`); 51.4% and 50.9% beside them. By the hour
+  the two starts are level from 1.0 h to 1.6 h; per game arm 7's final is the strongest network of
+  the pilot (60.0% against arm 2, 52.8% against arm 6, 57.4% against arm 5, 65.9% / 68.6% against
+  the baselines). The one page is final for all seven arms (`pilot_arms/ONE_PAGE.md`, detail in
+  `pilot_h2h/H2H.md` part H). The user chose that line at 00:10.
+- **The rebuilt convergence patch** (its hand-over files were deleted by the system's /tmp clean-up
+  during the pause) gives exactly the tree my 10-12 check verified, so that check holds for it.
+- **The long run's merged tree L** (`~/vgczero-build/L/vgczero`: M + the round-2 engine fixes + team
+  convergence + the refreshed pool + the live-play fixes) checked independently
+  (`merge_verify/VERIFY.md`), all five points asked hold: L equals my own rebuild from the four
+  sources plus the builder's six hand edits, byte for byte; my own build of its engine passes 509 of
+  509 parity scenarios (M's engine fails 36 of them); with team convergence off, a short training
+  run is identical to the tree without it, straight and across a restart; the held-out split and
+  training weights of the new keep list reproduce with my own code; the long-run line equals the
+  user's four decisions and its 400M-game horizon sits inside the band (330M to 504M). One
+  correction to the builder's log: one engine hunk (`worlds.rs`) applies with fuzz 2, not "no
+  fuzz" (macOS `patch` reports fuzz only with `--verbose`); the file is right, checked three ways.
+  Also found: macOS `diff3 -m` silently drops a line of that file, so it must not merge this tree.
+- The deployed configuration is untouched. Search is still off in the deployed bot.
+
 ## Overnight for the vgczero session, second part: the six finished pilot arms played against each other, one page for the long run's settings, its team-convergence fixes checked (2026-October 12, 07:45)
 
 - Continues the 00:54 entry below. Side work for the vgczero session; no code of this repository
