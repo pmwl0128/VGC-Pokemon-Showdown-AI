@@ -1,5 +1,32 @@
 # VGC Bot Project Status
 
+## For the vgczero session: the four round-3 simulator mismatches traced to their causes, the fixes and the long run's package checked independently (2026-October 21, 22:47)
+
+- Side work at the user's word ("back at it, help the other context tonight"). No code of this
+  repository changed; nothing here touches the ladder or the deployed bot. Files in
+  `~/vgczero-peer/` (`round3_targets/`, `fix_verify/`, `merge_verify/`).
+- **The four mismatches of the simulator's third round, traced to Showdown's source** (oracle
+  942cda71d), each with crafted battles that fail on the unfixed engine and controls that do not:
+  Yawn was blocked at once under Misty Terrain (Showdown only blocks the sleep at its end); a
+  fainted Pokemon's queued action is re-sorted at its plain Speed stat (no Choice Scarf, ability,
+  status or even Tailwind; only Trick Room); Champions' Encore that turns a move into Counter or
+  Mirror Coat also arms it; Hard Press's power goes through a 4096ths fraction (one point lower on
+  1.8% of HP values). Two of the morning's first guesses were wrong. Also own targets for the
+  fixer's extra change (a fainted Pokemon's move priority: no Prankster; Levitate no longer lifts
+  it for Grassy Glide).
+- **The fixes** (I's final engine f1256940b3e6): the change set reproduces the engine byte for
+  byte; my own build passes 550 of 550 recorded scenarios and the whole engine suite; the unfixed
+  engine fails exactly the 21 target scenarios and nothing else; my 22 crafted battles all agree
+  after the fix; the four flagged entries re-run on their seeds give 4,705 scenarios, 0 flagged.
+- **The long run's package** (`~/vgczero-box-long-20261021.tar.gz`, sha256 77113b2a53cc...): its
+  tree equals the long run's tree minus exactly what the packer leaves out, its fingerprint
+  recomputed by my own code matches, its engine is I's final engine plus the three pool-build
+  changes byte for byte, both start lines from its own runbook pass the launcher's check-only (only
+  the graphics-card row fails, on the laptop), no credentials in it, its five regression fixtures
+  are the verified ones, and its own engine builds and passes 42 of 42 tests and 550 of 550
+  scenarios. The verdict released the copy to the rented box.
+- The deployed configuration is untouched. Search is still off in the deployed bot.
+
 ## Resumed for the vgczero session: arm 7's test played (the planned start line stands), and the long run's merged tree checked independently (2026-October 21, 00:40)
 
 - The user resumed the paused work on 10-20 at about 23:50 ("back at it, help out the other
