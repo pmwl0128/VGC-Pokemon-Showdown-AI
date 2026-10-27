@@ -83,6 +83,7 @@ function buildEngine() {
 function runEngine(args, input) {
 	const body = input.map(x => JSON.stringify(x)).join('\n') + '\n';
 	const r = cp.spawnSync(PARITY_BIN, args, { input: body, maxBuffer: 1 << 30 });
+	if (r.error) throw new Error(`parity ${args.join(' ')}: cannot run ${PARITY_BIN}: ${r.error.message}`);
 	if (r.status !== 0) {
 		throw new Error(`parity ${args.join(' ')} failed (${r.status}):\n${r.stderr.toString().slice(0, 4000)}`);
 	}
