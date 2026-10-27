@@ -16,9 +16,8 @@ use vgczero_engine::state::Pos;
 use vgczero_engine::load_dex;
 
 fn fixture(name: &str) -> Option<Vec<Value>> {
-    let root = env!("CARGO_MANIFEST_DIR");
-    load_dex(&format!("{root}/../data/dex_regmc.json.gz")).unwrap();
-    let path = format!("{root}/../showdown/parity/fixtures/{name}");
+    load_dex(&vgczero_engine::data_path("dex.json.gz")).unwrap();
+    let path = vgczero_engine::data_path(&format!("fixtures/{name}"));
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(_) => {

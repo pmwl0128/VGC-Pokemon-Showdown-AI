@@ -5,6 +5,9 @@
 //!   parity turn N   < jsonl    -> per line {id, counts: {feature: {value: n}}, errors} over N seeds
 //!   parity turnlog S < jsonl   -> per line one run (seed S) with the engine log, for debugging
 //!   parity legal    < jsonl    -> per line {id, sides: [summary, summary]}
+//!   parity exact    < jsonl    -> per line {id, features, draws, log, seed_after}: one step from
+//!                                 {state | teams, seed: "sodium,..", choices} in compatibility mode
+//!                                 (build with --features trace)
 //!
 //! Input states are Showdown battles exported by lib.js `exportState`.
 
@@ -45,15 +48,14 @@ fn each_line(out: &mut impl Write, f: impl Fn(&Value) -> Result<Value, String>) 
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let root = env!("CARGO_MANIFEST_DIR");
-    load_dex(&format!("{root}/../data/dex_regmc.json.gz")).unwrap();
+    load_dex(&vgczero_engine::data_path("dex.json.gz")).unwrap();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let num_arg = |dflt: u64| args.get(2).and_then(|s| s.parse().ok()).unwrap_or(dflt);
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     match cmd {
         "supported" => {
-            let teams = load_teams(&format!("{root}/../data/teams_regmc.json.gz")).unwrap();
+            let teams = load_teams(&vgczero_engine::data_path("teams.json.gz")).unwrap();
             let idx: Vec<usize> = (0..teams.len()).filter(|&i| teams[i].supported()).collect();
             let d = dex();
             let mut abilities = std::collections::BTreeSet::new();
@@ -108,6 +110,37 @@ fn main() {
                 Ok(json!({"before": before, "log": log, "after": b.summary(), "features": b.outcome_features(log0)}))
             })
         }
+        "exact" => each_line(&mut out, |line| {
+            let seed = line.get("seed").and_then(|x| x.as_str()).ok_or("no seed")?;
+            let rng = vgczero_engine::rng::Rng::from_showdown_seed(seed)?;
+            let mut b = match line.get("state").filter(|x| !x.is_null()) {
+                Some(state) => {
+                    let mut b = Battle::from_state_json(state, 1)?;
+                    b.rng = rng;
+                    b
+                }
+                None => {
+                    // Team preview: construct from the initial seed like Showdown does.
+                    let tv = line.get("teams").and_then(|x| x.as_array()).ok_or("no teams")?;
+                    let teams: Vec<vgczero_engine::TeamSpec> = tv.iter().map(vgczero_engine::teams::parse_team).collect();
+                    let cfg = vgczero_engine::BattleConfig { turn_limit: 1000, ally_damage_targeting: true, log: true, sheets: [false, false] };
+                    Battle::with_rng([&teams[0], &teams[1]], rng, cfg)
+                }
+            };
+            let cs = line.get("choices").and_then(|x| x.as_array()).ok_or("no choices")?;
+            let choices = [choice_from_json(&cs[0])?, choice_from_json(&cs[1])?];
+            let log0 = b.log_lines.len();
+            #[cfg(feature = "trace")]
+            vgczero_engine::rng::trace::start();
+            let stepped = b.step(choices).map_err(|e| e.0);
+            #[cfg(feature = "trace")]
+            let draws = vgczero_engine::rng::trace::take();
+            #[cfg(not(feature = "trace"))]
+            let draws: Vec<(u32, u32, u32, String)> = vec![];
+            stepped?;
+            Ok(json!({"features": b.outcome_features(log0), "draws": draws, "log": b.log_lines[log0..].to_vec(),
+                "seed_after": b.rng.showdown_seed()}))
+        }),
         "legal" => each_line(&mut out, |line| {
             let b = Battle::from_state_json(line.get("state").ok_or("no state")?, 1)?;
             Ok(json!({"sides": [b.legal_summary(0), b.legal_summary(1)]}))

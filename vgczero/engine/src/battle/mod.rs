@@ -14,6 +14,10 @@ mod legal;
 mod moves;
 mod residual;
 mod switching;
+mod targeting;
+mod turn;
+pub mod ties;
+pub use targeting::NO_ORIG;
 
 pub use calc::ActiveMove;
 pub use calc::{resist_berry as resist_berry_of, type_booster as type_booster_of};
@@ -77,7 +81,21 @@ impl Default for BattleConfig {
 pub enum ActionKind {
     Switch { to: u8 },
     Mega,
-    Move { mslot: u8, target: u8 },
+    /// `recharge`: Showdown's dex-less 'recharge' move (the turn after Hyper Beam), which
+    /// stays that move even once its user has fainted.
+    Move { mslot: u8, target: u8, recharge: bool },
+    /// A switch chosen in a switch request (order 3).
+    InstaSwitch { to: u8 },
+    /// Revival Blessing's choice of a fainted Pokemon, chosen in a switch request (order 6).
+    RevivalBlessing { to: u8 },
+    /// Switch-in effects of the Pokemon at `pos` (order 101).
+    RunSwitch,
+    /// Battle start: the leads switch in (order 2).
+    Start,
+    /// eachEvent('BeforeTurn') (order 4).
+    BeforeTurn,
+    /// End-of-turn residual effects (order 300).
+    Residual,
 }
 
 /// A queued action for one active slot.
@@ -95,6 +113,10 @@ pub struct Action {
     pub speed: i32,
     /// The move this action will use (for Sucker Punch, Encore changes).
     pub move_id: u16,
+    /// Showdown `action.targetLoc` after resolveAction (foe slot k = k + 1, own slot k = -(k + 1)).
+    pub loc: i8,
+    /// `action.originalTarget` as side * 6 + team index, or `NO_ORIG`.
+    pub orig: u8,
 }
 
 pub const MAX_QUEUE: usize = 16;
@@ -151,6 +173,10 @@ impl Queue {
         }
         self.len = j;
     }
+    /// queue.willAct(): a move or switch is still to come (markers do not act).
+    pub fn will_act(&self) -> bool {
+        self.iter().any(|a| matches!(a.kind, ActionKind::Move { .. } | ActionKind::Switch { .. } | ActionKind::InstaSwitch { .. }))
+    }
     /// Move action still to come for this position, if any.
     pub fn will_move(&self, p: Pos) -> Option<&Action> {
         self.iter().find(|a| a.pos == p && matches!(a.kind, ActionKind::Move { .. }))
@@ -159,6 +185,8 @@ impl Queue {
 
 #[derive(Clone, Debug)]
 pub struct Battle {
+    /// Immutable process dex, resolved once when the battle is constructed.
+    pub(crate) dex: &'static crate::dex::Dex,
     pub sides: [Side; 2],
     pub field: Field,
     pub turn: u16,
@@ -179,6 +207,8 @@ pub struct Battle {
     pub(crate) round_used: bool,
     /// Number of turns where nothing happened (endless battle guard).
     pub stall_turns: u16,
+    /// Showdown's midTurn: the beforeTurn and residual actions of this turn are queued.
+    pub mid_turn: bool,
 }
 
 macro_rules! blog {
@@ -200,6 +230,12 @@ impl std::fmt::Display for ChoiceError {
 impl Battle {
     /// A new battle at team preview.
     pub fn new(teams: [&TeamSpec; 2], seed: u64, cfg: BattleConfig) -> Battle {
+        Battle::with_rng(teams, Rng::new(seed), cfg)
+    }
+
+    /// A new battle at team preview with an explicit stream (`Rng::sodium` reproduces a
+    /// Showdown battle created with the same seed, including its construction draws).
+    pub fn with_rng(teams: [&TeamSpec; 2], rng: Rng, cfg: BattleConfig) -> Battle {
         let mk_side = |t: &TeamSpec, sheet: bool| {
             let mut mons = [Mon::from_set(&t.mons[0], 0); 6];
             for (i, set) in t.mons.iter().enumerate() {
@@ -221,10 +257,11 @@ impl Battle {
             }
         };
         let mut b = Battle {
+            dex: dex(),
             sides: [mk_side(teams[0], cfg.sheets[0]), mk_side(teams[1], cfg.sheets[1])],
             field: Field::default(),
             turn: 0,
-            rng: Rng::new(seed),
+            rng,
             phase: Phase::TeamPreview,
             queue: Queue::default(),
             switch_slots: [[false; 2]; 2],
@@ -235,7 +272,17 @@ impl Battle {
             mold_breaker: false,
             round_used: false,
             stall_turns: 0,
+            mid_turn: false,
         };
+        // Pokemon are constructed p1 then p2, in team order; each unset gender is one
+        // sample(['M', 'F']) draw.
+        for s in 0..2 {
+            for m in b.sides[s].mons.iter_mut() {
+                if m.gender == crate::teams::GENDER_RANDOM {
+                    m.gender = 1 + b.rng.below(2) as u8;
+                }
+            }
+        }
         for s in 0..2 {
             if b.sides[s].sheet_open {
                 for m in b.sides[s].mons.iter_mut() {
@@ -317,6 +364,15 @@ impl Battle {
 
     /// Apply both sides' choices and run until the next decision point.
     pub fn step(&mut self, choices: [Choice; 2]) -> Result<(), ChoiceError> {
+        crate::prof!("step");
+        self.validate_choices(&choices)?;
+        self.step_unchecked(choices);
+        Ok(())
+    }
+
+    /// `step`'s validation alone: whether it would accept these choices (per-slot legality
+    /// as `legal_mask` gives it, plus the joint rules: one switch target per side, one Mega).
+    pub fn validate_choices(&self, choices: &[Choice; 2]) -> Result<(), ChoiceError> {
         match self.phase {
             Phase::Ended => Err(ChoiceError("battle is over".into())),
             Phase::TeamPreview => {
@@ -325,6 +381,33 @@ impl Battle {
                         return Err(ChoiceError(format!("side {s}: bad preview {}", c.preview)));
                     }
                 }
+                Ok(())
+            }
+            Phase::Move => {
+                for s in 0..2 {
+                    self.validate_move_choice(s, &choices[s])?;
+                }
+                Ok(())
+            }
+            Phase::Switch { .. } => {
+                for s in 0..2 {
+                    self.validate_switch_choice(s, &choices[s])?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `step` for choices that pass `validate_choices` (a policy drew them from `legal_mask`
+    /// and the joint rules, or the caller validated them against this very state): the same
+    /// transition without checking them again. Debug builds assert the precondition; a release
+    /// build given an invalid choice makes an unspecified (but memory-safe) transition.
+    pub fn step_unchecked(&mut self, choices: [Choice; 2]) {
+        crate::prof!("step_unchecked");
+        debug_assert!(self.validate_choices(&choices).is_ok(), "step_unchecked: choices fail validation");
+        match self.phase {
+            Phase::Ended => {}
+            Phase::TeamPreview => {
                 for (s, c) in choices.iter().enumerate() {
                     let row = preview_table()[c.preview as usize];
                     for &i in &row {
@@ -347,30 +430,34 @@ impl Battle {
                     }
                 }
                 blog!(self, "|start");
-                self.turn = 1;
-                let all: Vec<Pos> = (0..4).map(Pos::from_code).collect();
-                self.run_switch_in(&all);
-                self.after_actions_check();
-                if self.phase != Phase::Ended && !matches!(self.phase, Phase::Switch { .. }) {
-                    self.begin_turn();
+                // commitChoices sorts the team actions (order 1, priority -index, speed =
+                // getActionSpeed: the raw Speed stat before the battle starts): same-index
+                // picks of equal speed tie and draw. Their order has no further effect here.
+                let mut team = [(0i32, 0i32); 8];
+                for (s, c) in choices.iter().enumerate() {
+                    let row = preview_table()[c.preview as usize];
+                    for (index, &i) in row.iter().enumerate() {
+                        team[s * 4 + index] = (-(index as i32), self.sides[s].mons[i as usize].stats[5] as i32);
+                    }
                 }
-                Ok(())
+                crate::rng::speed_sort(&mut self.rng, &mut team, |a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+                // start(): the start action is queued and midTurn set; endTurn makes turn 1.
+                self.turn = 0;
+                self.update_speed();
+                self.queue = Queue::default();
+                self.queue.push(Self::marker(ActionKind::Start, turn::ORDER_START));
+                self.mid_turn = true;
+                self.phase = Phase::Move;
+                self.turn_loop();
             }
             Phase::Move => {
-                for s in 0..2 {
-                    self.validate_move_choice(s, &choices[s])?;
-                }
-                self.build_queue(&choices);
-                self.run_queue();
-                Ok(())
+                self.commit_moves(&choices);
             }
-            Phase::Switch { midturn } => {
+            Phase::Switch { .. } => {
                 let mut choices = choices;
                 for s in 0..2 {
-                    self.validate_switch_choice(s, &choices[s])?;
                     self.complete_switch_choice(s, &mut choices[s]);
                 }
-                let mut switched = vec![];
                 // A Revival Blessing user that passes keeps its switch flag
                 // (Showdown asks again after the next action).
                 let mut revive_pass = [[false; 2]; 2];
@@ -384,52 +471,9 @@ impl Battle {
                             revive_pass[s][slot] = true;
                             self.mm(p).vol.switch_flag = false;
                         }
-                        if let SlotAction::Switch(to) = decode(choices[s].slots[slot]) {
-                            let p = Pos::new(s, slot);
-                            if self.sides[s].reviving[slot] {
-                                // Revival Blessing: `to` is the fainted Pokemon to revive.
-                                if let Some(q) = self.revive(p, to as usize) {
-                                    switched.push(q);
-                                }
-                            } else {
-                                self.switch_out_in(p, to as usize);
-                                switched.push(p);
-                            }
-                        }
                     }
                 }
-                self.switch_slots = [[false; 2]; 2];
-                self.phase = Phase::Move;
-                self.run_switch_in(&switched);
-                self.after_actions_check();
-                for s in 0..2 {
-                    for slot in 0..2 {
-                        let p = Pos::new(s, slot);
-                        if revive_pass[s][slot] && self.is_live(p) {
-                            self.mm(p).vol.switch_flag = true;
-                        }
-                    }
-                }
-                if matches!(self.phase, Phase::Switch { .. }) || self.ended() {
-                    // A switch-in caused another pending switch (e.g. hazards
-                    // triggering Emergency Exit); keep the original timing.
-                    if let Phase::Switch { .. } = self.phase {
-                        self.phase = Phase::Switch { midturn };
-                    }
-                    return Ok(());
-                }
-                if midturn {
-                    // The queue is re-sorted after the switch (speeds may have
-                    // changed: weather, Intimidate...).
-                    if self.queue.len > 0 {
-                        self.update_queue_speeds();
-                        self.sort_queue();
-                    }
-                    self.run_queue();
-                } else {
-                    self.check_end_of_turn_replacements();
-                }
-                Ok(())
+                self.commit_switches(&choices, revive_pass);
             }
         }
     }
@@ -550,8 +594,8 @@ impl Battle {
         for slot in 0..2 {
             let p = Pos::new(s, slot);
             let a = c.slots[slot];
-            let mask = self.legal_mask(s, slot);
-            if mask & (1u32 << a) == 0 {
+            if !self.action_legal(s, slot, a) {
+                let mask = self.legal_mask(s, slot);
                 return Err(ChoiceError(format!(
                     "side {s} slot {slot}: illegal action {a} ({:?}); legal mask {mask:#b}",
                     decode(a)
@@ -581,6 +625,9 @@ impl Battle {
 
     /// Start-of-turn bookkeeping, then wait for move choices.
     pub(crate) fn begin_turn(&mut self) {
+        crate::prof!("begin_turn");
+        // endTurn's per-Pokemon DisableMove / TrapPokemon events.
+        self.end_turn_event_sorts();
         if self.turn >= self.cfg.turn_limit {
             blog!(self, "|tie|turn limit");
             self.winner = Some(2);
@@ -591,7 +638,8 @@ impl Battle {
         for s in 0..2 {
             self.sides[s].fainted_last_turn = self.sides[s].fainted_this_turn;
             self.sides[s].fainted_this_turn = false;
-            for m in self.sides[s].mons.iter_mut() {
+            // Only brought Pokemon ever set these.
+            for m in self.sides[s].mons.iter_mut().filter(|m| m.brought) {
                 let v = &mut m.vol;
                 v.last_move_failed = v.this_move_failed;
                 v.this_move_failed = false;
@@ -608,9 +656,10 @@ impl Battle {
         self.phase = Phase::Move;
     }
 
-    fn build_queue(&mut self, choices: &[Choice; 2]) {
+    pub(crate) fn build_queue(&mut self, choices: &[Choice; 2]) {
+        crate::prof!("build_queue");
         self.queue = Queue::default();
-        let d = dex();
+        let d = self.dex;
         for s in 0..2 {
             for slot in 0..2 {
                 let p = Pos::new(s, slot);
@@ -630,6 +679,8 @@ impl Battle {
                             frac: 0,
                             speed: 0,
                             move_id: 0,
+                            loc: 0,
+                            orig: NO_ORIG,
                         });
                     }
                     SlotAction::Move { slot: ms, target, mega } => {
@@ -643,12 +694,15 @@ impl Battle {
                                 frac: 0,
                                 speed: 0,
                                 move_id: 0,
+                                loc: 0,
+                                orig: NO_ORIG,
                             });
                         }
                         let (mid, ms) = self.resolve_chosen_move(p, ms as usize);
                         let mv = d.mv(mid);
+                        let recharge = self.m(p).vol.must_recharge;
                         let mut a = Action {
-                            kind: ActionKind::Move { mslot: ms as u8, target },
+                            kind: ActionKind::Move { mslot: ms as u8, target, recharge },
                             pos: p,
                             mon: mon_idx,
                             order: 200,
@@ -656,19 +710,39 @@ impl Battle {
                             frac: 0,
                             speed: 0,
                             move_id: mid,
+                            loc: 0,
+                            orig: NO_ORIG,
                         };
                         a.priority = self.modify_priority(p, mid, a.priority);
+                        // A recharge turn is Showdown's 'recharge' move: priority 0, target self.
+                        if recharge {
+                            a.priority = 0;
+                        }
+                        // resolveAction: FractionalPriority (Quick Claw) first, then the target.
                         if self.m(p).item != 0 && d.it(self.m(p).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
                             a.frac = 1;
                             blog!(self, "|-activate|{}|item: Quick Claw", self.name(p));
+                        }
+                        if recharge {
+                            // The locked 'recharge' move keeps lastMoveTargetLoc (no resolution
+                            // draw); its getActionSpeed getTarget draws (see recharge_target_draw).
+                            self.recharge_target_draw(p);
+                        } else {
+                            let (loc, orig) = self.resolve_target(p, mid, if self.m(p).vol.charging > 0 { None } else { Some(target) });
+                            a.loc = loc;
+                            a.orig = orig;
+                            // getActionSpeed (end of resolveAction) calls getTarget for ModifyPriority.
+                            let _ = self.get_target(p, mid, loc, NO_ORIG);
                         }
                         self.queue.push(a);
                     }
                 }
             }
         }
-        self.update_queue_speeds();
+        // commitChoices: speeds were computed at resolution; queue.sort() only.
+        self.set_queue_speeds();
         self.sort_queue();
+        let _ = PASS;
     }
 
     /// The move a slot will actually use (charging / locked / Struggle).
@@ -679,7 +753,7 @@ impl Battle {
             return (m.moves[s], s);
         }
         if self.must_struggle(p) {
-            return (dex().struggle, 0);
+            return (self.dex.struggle, 0);
         }
         if m.vol.encore > 0 {
             let s = m.vol.encore_slot as usize;
@@ -691,18 +765,139 @@ impl Battle {
     /// Showdown's getActionSpeed for every queued action: the speed, and for
     /// moves the priority (ModifyPriority: Grassy Glide, Prankster...).
     pub(crate) fn update_queue_speeds(&mut self) {
+        crate::prof!("update_queue_speeds");
+        // Showdown's getActionSpeed calls getTarget (Grassy Glide) for every queued move,
+        // including moves of Pokemon that fainted since: random targets draw each time.
+        for i in 0..self.queue.len {
+            if let Some(a) = self.queue.list[i] {
+                if let ActionKind::Move { .. } = a.kind {
+                    if self.is_recharge(&a) {
+                        self.recharge_target_draw(a.pos);
+                    } else {
+                        let _ = self.get_target(a.pos, a.move_id, a.loc, NO_ORIG);
+                    }
+                }
+            }
+        }
+        self.set_queue_speeds();
+    }
+
+    /// getTarget for Showdown's 'recharge' move: it is not in the dex, so its target is
+    /// undefined and getTarget always falls back to randomFoe().
+    pub(crate) fn recharge_target_draw(&mut self, p: Pos) {
+        let _ = self.get_random_target(p, crate::dex::Target::Normal);
+    }
+
+    /// The queued move is the user's recharge turn (Showdown's 'recharge' move).
+    fn is_recharge(&self, a: &Action) -> bool {
+        matches!(a.kind, ActionKind::Move { recharge: true, .. })
+    }
+
+    /// Speeds and priorities of the queued actions (no draws), right after updateSpeed. The
+    /// action of a Pokemon that fainted since stays queued and is re-measured too: it is
+    /// inactive, so no Pokemon handler (Prankster, Choice Scarf, Tailwind...) applies, only
+    /// the move's own Grassy Glide check with item and ability ignored.
+    fn set_queue_speeds(&mut self) {
         for i in 0..self.queue.len {
             if let Some(mut a) = self.queue.list[i] {
-                if self.sides[a.pos.s()].active[a.pos.i()] == a.mon && self.is_live(a.pos) {
-                    a.speed = self.action_speed(a.pos);
+                if a.mon != NO_MON && self.sides[a.pos.s()].active[a.pos.i()] == a.mon {
+                    // Callers run updateSpeed first and change nothing speed-related in
+                    // between, so an unfainted Pokemon's cached speed is its action speed.
+                    a.speed = if self.m(a.pos).fainted {
+                        self.action_speed(a.pos)
+                    } else {
+                        debug_assert_eq!(self.m(a.pos).speed, self.action_speed(a.pos));
+                        self.m(a.pos).speed
+                    };
                     if let ActionKind::Move { .. } = a.kind {
-                        let base = dex().mv(a.move_id).priority;
-                        a.priority = self.modify_priority(a.pos, a.move_id, base);
+                        let base = self.dex.mv(a.move_id).priority;
+                        a.priority = if self.is_recharge(&a) {
+                            0
+                        } else if self.m(a.pos).fainted {
+                            let m = self.m(a.pos);
+                            let grounded = self.field.gravity > 0 || !m.has_type(crate::types::Type::Flying);
+                            let glide = self.dex.mv(a.move_id).fx == crate::kinds::MoveFx::GrassyGlide
+                                && self.field.terrain == crate::dex::Terrain::Grassy
+                                && grounded;
+                            base + glide as i8
+                        } else {
+                            self.modify_priority(a.pos, a.move_id, base)
+                        };
                     }
                 }
                 self.queue.list[i] = Some(a);
             }
         }
+    }
+
+    /// Showdown's queue.changeAction(pokemon, {choice: 'move', moveid}) as Champions Encore
+    /// uses it: cancelAction (every queued action of the Pokemon) then insertChoice, whose
+    /// resolveAction rolls FractionalPriority, picks a random target and runs getActionSpeed.
+    pub(crate) fn change_action(&mut self, p: Pos, mslot: usize, move_id: u16) {
+        let mon = self.sides[p.s()].active[p.i()];
+        // insertChoice updates the Pokemon's cached speed first.
+        let s = self.action_speed(p);
+        self.mm(p).speed = s;
+        self.queue.remove_where(|a| a.pos == p && a.mon == mon);
+        let d = self.dex;
+        let mut a = Action {
+            kind: ActionKind::Move { mslot: mslot as u8, target: TARGET_RANDOM, recharge: false },
+            pos: p,
+            mon,
+            order: 200,
+            priority: self.modify_priority(p, move_id, d.mv(move_id).priority),
+            frac: 0,
+            speed: 0,
+            move_id,
+            loc: 0,
+            orig: NO_ORIG,
+        };
+        if self.m(p).item != 0 && d.it(self.m(p).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
+            a.frac = 1;
+            blog!(self, "|-activate|{}|item: Quick Claw", self.name(p));
+        }
+        let (loc, orig) = self.resolve_target(p, move_id, Some(TARGET_RANDOM));
+        a.loc = loc;
+        a.orig = orig;
+        let _ = self.get_target(p, move_id, loc, NO_ORIG);
+        a.speed = self.action_speed(p);
+        self.insert_choice(a);
+    }
+
+    /// Showdown's queue.insertChoice for one resolved action: before the first queued action
+    /// it sorts strictly ahead of; among equal-key actions at a random position.
+    pub(crate) fn insert_choice(&mut self, a: Action) {
+        #[inline]
+        fn key(x: &Action) -> (i64, i64, i64, i64) {
+            (x.order as i64, -(x.priority as i64), -(x.frac as i64), -(x.speed as i64))
+        }
+        let (mut first, mut last) = (None, None);
+        for i in 0..self.queue.len {
+            let Some(cur) = self.queue.list[i] else { continue };
+            let c = key(&a).cmp(&key(&cur));
+            if c != std::cmp::Ordering::Greater && first.is_none() {
+                first = Some(i);
+            }
+            if c == std::cmp::Ordering::Less {
+                last = Some(i);
+                break;
+            }
+        }
+        let index = match first {
+            None => self.queue.len,
+            Some(f) => {
+                let l = last.unwrap_or(self.queue.len);
+                if f == l { f } else { self.rng.range(f as u32, l as u32 + 1) as usize }
+            }
+        };
+        if self.queue.len >= MAX_QUEUE {
+            return;
+        }
+        for j in (index..self.queue.len).rev() {
+            self.queue.list[j + 1] = self.queue.list[j];
+        }
+        self.queue.list[index] = Some(a);
+        self.queue.len += 1;
     }
 
     /// Showdown's queue.prioritizeAction: the action goes next (order 3).
@@ -718,6 +913,7 @@ impl Battle {
 
     /// Showdown's speedSort: order asc, priority desc, speed desc; ties shuffled.
     pub(crate) fn sort_queue(&mut self) {
+        crate::prof!("sort_queue");
         // Drop empty entries, then an in-place selection sort with random
         // tie resolution (as Showdown does).
         let mut n = 0;
@@ -736,133 +932,12 @@ impl Battle {
             let a = a.as_ref().unwrap();
             (a.order as i64, -(a.priority as i64), -(a.frac as i64), -(a.speed as i64))
         }
-        let list = &mut self.queue.list;
-        for sorted in 0..n {
-            let mut best = key(&list[sorted]);
-            let mut ties = 1u32;
-            for i in sorted + 1..n {
-                let k = key(&list[i]);
-                if k < best {
-                    best = k;
-                    ties = 1;
-                } else if k == best {
-                    ties += 1;
-                }
-            }
-            let rank = if ties > 1 { self.rng.below(ties) } else { 0 };
-            let mut r = 0;
-            let mut idx = sorted;
-            for i in sorted..n {
-                if key(&list[i]) == best {
-                    if r == rank {
-                        idx = i;
-                        break;
-                    }
-                    r += 1;
-                }
-            }
-            let a = list[idx];
-            for j in (sorted..idx).rev() {
-                list[j + 1] = list[j];
-            }
-            list[sorted] = a;
-        }
-    }
-
-    /// Process queued actions until the queue empties (then end the turn), a
-    /// mid-turn switch is needed, or the battle ends.
-    pub(crate) fn run_queue(&mut self) {
-        while let Some(a) = self.queue.pop_front() {
-            // Skip actions whose Pokemon left or fainted.
-            if self.sides[a.pos.s()].active[a.pos.i()] != a.mon || !self.is_live(a.pos) {
-                continue;
-            }
-            match a.kind {
-                ActionKind::Switch { to } => {
-                    if self.sides[a.pos.s()].can_switch_to(to as usize) {
-                        self.switch_out_in(a.pos, to as usize);
-                        self.run_switch_in(&[a.pos]);
-                    } else if let Some(alt) = (0..6).find(|&i| self.sides[a.pos.s()].can_switch_to(i)) {
-                        // The chosen Pokemon was already sent in by the ally slot.
-                        self.switch_out_in(a.pos, alt);
-                        self.run_switch_in(&[a.pos]);
-                    }
-                }
-                ActionKind::Mega => self.mega_evolve(a.pos),
-                ActionKind::Move { mslot, target } => {
-                    self.run_move_action(a.pos, mslot as usize, target, a.move_id);
-                }
-            }
-            if self.ended() {
-                return;
-            }
-            self.after_actions_check();
-            if self.ended() || matches!(self.phase, Phase::Switch { .. }) {
-                return;
-            }
-            // Gen 8+: speeds update and the queue re-sorts after every action.
-            if self.queue.len > 0 {
-                self.update_queue_speeds();
-                self.sort_queue();
-            }
-        }
-        self.end_turn();
-    }
-
-    /// After any action: faints, win check, pending self-switches.
-    pub(crate) fn after_actions_check(&mut self) {
-        self.process_faints();
-        if self.ended() {
-            return;
-        }
-        self.update_all();
-        self.process_faints();
-        if self.ended() {
-            return;
-        }
-        // Mid-turn switches (U-turn, Parting Shot, Emergency Exit, Eject Button).
-        let mut any = false;
-        let mut slots = [[false; 2]; 2];
-        for s in 0..2 {
-            for slot in 0..2 {
-                let p = Pos::new(s, slot);
-                if !self.is_live(p) {
-                    continue;
-                }
-                let m = self.m(p);
-                if m.vol.switch_flag {
-                    if self.sides[s].bench_available() > 0 || self.sides[s].reviving[slot] {
-                        slots[s][slot] = true;
-                        any = true;
-                    } else {
-                        self.mm(p).vol.switch_flag = false;
-                    }
-                }
-                if self.m(p).vol.force_switch {
-                    self.mm(p).vol.force_switch = false;
-                    self.drag_out(p);
-                }
-            }
-        }
-        if any {
-            // A side with two pending self-switches but one bench Pokemon
-            // chooses which slot switches (the other passes).
-            for s in 0..2 {
-                for slot in 0..2 {
-                    // (A Revival Blessing user keeps its flag until it picks.)
-                    if slots[s][slot] && !self.sides[s].reviving[slot] {
-                        let p = Pos::new(s, slot);
-                        self.mm(p).vol.switch_flag = false;
-                    }
-                }
-            }
-            self.switch_slots = slots;
-            self.phase = Phase::Switch { midturn: true };
-        }
+        crate::rng::speed_sort(&mut self.rng, &mut self.queue.list[..n], |a, b| key(a).cmp(&key(b)));
     }
 
     /// Faint any Pokemon at 0 HP and check for a winner.
     pub(crate) fn process_faints(&mut self) {
+        crate::prof!("process_faints");
         for c in 0..4 {
             let p = Pos::from_code(c);
             let i = self.sides[p.s()].active[p.i()];
@@ -906,81 +981,20 @@ impl Battle {
         if self.ended() {
             return;
         }
-        let left = [self.sides[0].alive_brought(), self.sides[1].alive_brought()];
-        let w = match (left[0], left[1]) {
-            (0, 0) => Some(match self.last_faint_side {
+        let w = match (self.sides[0].any_alive_brought(), self.sides[1].any_alive_brought()) {
+            (false, false) => Some(match self.last_faint_side {
                 // Gen 5+: the side whose Pokemon fainted last wins.
                 Some(s) => s,
                 None => 2,
             }),
-            (0, _) => Some(1),
-            (_, 0) => Some(0),
-            _ => None,
+            (false, true) => Some(1),
+            (true, false) => Some(0),
+            (true, true) => None,
         };
         if let Some(w) = w {
             blog!(self, "|win|{}", w);
             self.winner = Some(w);
             self.phase = Phase::Ended;
-        }
-    }
-
-    fn end_turn(&mut self) {
-        self.run_residual();
-        self.process_faints();
-        if self.ended() {
-            return;
-        }
-        // Emergency Exit can trigger from residual damage.
-        self.after_actions_check();
-        if self.ended() {
-            return;
-        }
-        if let Phase::Switch { .. } = self.phase {
-            // A residual-triggered self-switch (Emergency Exit) is handled
-            // like an end-of-turn replacement, in the same request as the
-            // fainted slots (Showdown's checkFainted).
-            for s in 0..2 {
-                if self.sides[s].bench_available() == 0 {
-                    continue;
-                }
-                for slot in 0..2 {
-                    let i = self.sides[s].active[slot];
-                    if i == NO_MON || self.sides[s].mons[i as usize].fainted {
-                        self.switch_slots[s][slot] = true;
-                    }
-                }
-            }
-            self.phase = Phase::Switch { midturn: false };
-            return;
-        }
-        self.check_end_of_turn_replacements();
-    }
-
-    /// End of turn: request replacements for fainted actives, else next turn.
-    pub(crate) fn check_end_of_turn_replacements(&mut self) {
-        let mut slots = [[false; 2]; 2];
-        let mut any = false;
-        for s in 0..2 {
-            // Every fainted slot is flagged if any replacement exists; with
-            // fewer replacements than slots the player picks which pass.
-            if self.sides[s].bench_available() == 0 {
-                continue;
-            }
-            for slot in 0..2 {
-                let i = self.sides[s].active[slot];
-                let empty = i == NO_MON || self.sides[s].mons[i as usize].fainted;
-                if empty {
-                    slots[s][slot] = true;
-                    any = true;
-                }
-            }
-        }
-        if any {
-            self.switch_slots = slots;
-            self.phase = Phase::Switch { midturn: false };
-        } else {
-            self.turn += 1;
-            self.begin_turn();
         }
     }
 
@@ -995,12 +1009,12 @@ impl Battle {
             "p{}{}: {}",
             p.side + 1,
             if p.slot == 0 { 'a' } else { 'b' },
-            dex().sp(self.sides[p.s()].mons[i as usize].species).name
+            self.dex.sp(self.sides[p.s()].mons[i as usize].species).name
         )
     }
 
     pub fn mon_name(&self, side: usize, i: usize) -> &'static str {
-        &dex().sp(self.sides[side].mons[i].species).name
+        &self.dex.sp(self.sides[side].mons[i].species).name
     }
 
     /// Log lines recorded so far (cfg.log).
@@ -1021,7 +1035,7 @@ impl Battle {
                     "  p{} {}{} {}/{} {:?} {:?}{}\n",
                     s + 1,
                     if m.active() { "*" } else { " " },
-                    dex().sp(m.species).name,
+                    self.dex.sp(m.species).name,
                     m.hp,
                     m.max_hp,
                     m.status,

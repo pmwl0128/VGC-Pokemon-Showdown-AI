@@ -364,3 +364,6 @@ results_mirror_tactical3/*
 results_mirror_tactical4/*
 !results_mirror_tactical4/manifest.json
 !results_mirror_tactical4/result.json
+
+# --- Quark Drive fork: Rust workspace build output ---
+vgczero/target/

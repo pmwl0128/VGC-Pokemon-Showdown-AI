@@ -11,18 +11,17 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
+# Thread-local draw log for the exact parity harness (rng::trace).
+trace = []
+# Scoped cycle counters (prof!), printed by `bench` when built with this feature.
+prof = []
 python = ["dep:pyo3", "dep:numpy"]
 
 [dependencies]
+quark-drive-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1"
 rayon = "1"
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"], optional = true }
 numpy = { version = "0.23", optional = true }
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-debug = 1

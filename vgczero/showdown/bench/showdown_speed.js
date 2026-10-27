@@ -6,13 +6,12 @@
 const path = require('path');
 const zlib = require('zlib');
 const fs = require('fs');
-const PS = process.env.PS_DIR || path.join(__dirname, '..', 'ps');
+const { PS_DIR: PS, FORMAT, TEAMS_FILE } = require('../pinned');
 const { Teams } = require(path.join(PS, 'dist', 'sim'));
 const BattleStreams = require(path.join(PS, 'dist', 'sim', 'battle-stream'));
 const { RandomPlayerAI } = require(path.join(PS, 'dist', 'sim', 'tools', 'random-player-ai'));
-const FORMAT = 'gen9championsvgc2026regmc';
 
-const pool = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(__dirname, '..', '..', 'data', 'teams_regmc.json.gz'))));
+const pool = JSON.parse(zlib.gunzipSync(fs.readFileSync(TEAMS_FILE)));
 const texts = fs.readdirSync(path.join(__dirname, '..', '..', '..', 'teams', 'reg_mc')).slice(0, 400)
 	.map(f => Teams.pack(Teams.import(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'teams', 'reg_mc', f), 'utf8'))));
 

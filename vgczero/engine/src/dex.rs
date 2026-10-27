@@ -418,6 +418,8 @@ pub struct Secondary {
 #[derive(Clone, Debug, Default)]
 pub struct MoveData {
     pub id: String,
+    /// Position of `id` among all handler effect ids (ties.rs).
+    pub rank: u16,
     pub name: String,
     pub num: i32,
     pub ty: Type,
@@ -475,6 +477,8 @@ pub struct MoveData {
     pub has_sheer_force_boost: bool,
     pub fx: MoveFx,
     pub callbacks: Vec<String>,
+    /// The move defines onBasePower (a BasePower handler however it ends up modifying).
+    pub base_power_cb: bool,
     /// Why the engine cannot run this move faithfully (empty if it can).
     pub unsupported: Vec<String>,
 }
@@ -503,11 +507,148 @@ pub struct SpeciesData {
     pub weight_hg: u32,
     pub abilities: Vec<String>,
     pub is_mega: bool,
+    /// Fixed species gender: 1 male, 2 female, 0 genderless; `GENDER_RANDOM` when either.
+    pub gender: u8,
+}
+
+/// The modifier-event callbacks an item or ability defines, with their `<name>Priority`.
+/// Showdown's findEventHandlers collects a handler for every one present, whether or not it
+/// ends up modifying the value, and speedSort orders (and tie-shuffles) all of them.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Hooks {
+    pub mask: u32,
+    pub prio: [i8; hook::N],
+}
+
+pub mod hook {
+    pub const BASE_POWER: usize = 0;
+    pub const ALLY_BASE_POWER: usize = 1;
+    pub const ANY_BASE_POWER: usize = 2;
+    pub const SOURCE_BASE_POWER: usize = 3;
+    pub const MODIFY_ATK: usize = 4;
+    pub const ALLY_MODIFY_ATK: usize = 5;
+    pub const ANY_MODIFY_ATK: usize = 6;
+    pub const SOURCE_MODIFY_ATK: usize = 7;
+    pub const MODIFY_SPA: usize = 8;
+    pub const ALLY_MODIFY_SPA: usize = 9;
+    pub const ANY_MODIFY_SPA: usize = 10;
+    pub const SOURCE_MODIFY_SPA: usize = 11;
+    pub const MODIFY_DAMAGE: usize = 12;
+    pub const ALLY_MODIFY_DAMAGE: usize = 13;
+    pub const ANY_MODIFY_DAMAGE: usize = 14;
+    pub const SOURCE_MODIFY_DAMAGE: usize = 15;
+    pub const N: usize = 16;
+    pub const NAMES: [&str; N] = [
+        "onBasePower", "onAllyBasePower", "onAnyBasePower", "onSourceBasePower",
+        "onModifyAtk", "onAllyModifyAtk", "onAnyModifyAtk", "onSourceModifyAtk",
+        "onModifySpA", "onAllyModifySpA", "onAnyModifySpA", "onSourceModifySpA",
+        "onModifyDamage", "onAllyModifyDamage", "onAnyModifyDamage", "onSourceModifyDamage",
+    ];
+}
+
+impl Hooks {
+    fn parse(v: &Value, callbacks: &[String]) -> Hooks {
+        let mut h = Hooks::default();
+        for (k, name) in hook::NAMES.iter().enumerate() {
+            if callbacks.iter().any(|c| c == name) {
+                h.mask |= 1 << k;
+                h.prio[k] = n(v, &format!("{name}Priority")) as i8;
+            }
+        }
+        h
+    }
+    #[inline]
+    pub fn has(&self, k: usize) -> bool {
+        self.mask & (1 << k) != 0
+    }
+}
+
+/// Ids of the conditions (statuses, volatiles, side and field conditions) that hold event
+/// handlers; `Dex::cond_rank` ranks them with every move, item and ability id (ties.rs).
+macro_rules! conds {
+    ($($v:ident = $id:literal),* $(,)?) => {
+        #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub enum Cond { $($v),* }
+        impl Cond {
+            pub const IDS: &'static [&'static str] = &[$($id),*];
+            pub const N: usize = Cond::IDS.len();
+        }
+    };
+}
+conds! {
+    AquaRing = "aquaring",
+    AuroraVeil = "auroraveil",
+    BanefulBunker = "banefulbunker",
+    Brn = "brn",
+    BurningBulwark = "burningbulwark",
+    Charge = "charge",
+    ChoiceLock = "choicelock",
+    Curse = "curse",
+    Dig = "dig",
+    Disable = "disable",
+    Dive = "dive",
+    ElectricTerrain = "electricterrain",
+    Encore = "encore",
+    Endure = "endure",
+    FlashFire = "flashfire",
+    Flinch = "flinch",
+    Fly = "fly",
+    FollowMe = "followme",
+    GlaiveRush = "glaiverush",
+    GrassyTerrain = "grassyterrain",
+    Gravity = "gravity",
+    HealBlock = "healblock",
+    Healer = "healer",
+    HelpingHand = "helpinghand",
+    Imprison = "imprison",
+    Ingrain = "ingrain",
+    KingsShield = "kingsshield",
+    LeechSeed = "leechseed",
+    Leftovers = "leftovers",
+    LightScreen = "lightscreen",
+    MagnetRise = "magnetrise",
+    Mist = "mist",
+    MistyTerrain = "mistyterrain",
+    Moody = "moody",
+    MustRecharge = "mustrecharge",
+    PartiallyTrapped = "partiallytrapped",
+    PerishSong = "perishsong",
+    Protect = "protect",
+    Psn = "psn",
+    PsychicTerrain = "psychicterrain",
+    QuickGuard = "quickguard",
+    RagePowder = "ragepowder",
+    Reflect = "reflect",
+    Roost = "roost",
+    RunAway = "runaway",
+    Safeguard = "safeguard",
+    SaltCure = "saltcure",
+    ShadowTag = "shadowtag",
+    SilkTrap = "silktrap",
+    SpeedBoost = "speedboost",
+    SpikyShield = "spikyshield",
+    Stall = "stall",
+    Tailwind = "tailwind",
+    Taunt = "taunt",
+    Terrain = "terrain",
+    ThroatChop = "throatchop",
+    Torment = "torment",
+    Tox = "tox",
+    Trapped = "trapped",
+    TrickRoom = "trickroom",
+    TwoTurnMove = "twoturnmove",
+    Weather = "weather",
+    WhiteHerb = "whiteherb",
+    WideGuard = "wideguard",
+    Wish = "wish",
+    Yawn = "yawn",
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ItemData {
     pub id: String,
+    pub rank: u16,
     pub name: String,
     pub num: i32,
     pub kind: It,
@@ -515,21 +656,25 @@ pub struct ItemData {
     pub is_mega_stone: bool,
     pub fling_bp: u16,
     pub callbacks: Vec<String>,
+    pub hooks: Hooks,
     pub unsupported: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct AbilityData {
     pub id: String,
+    pub rank: u16,
     pub name: String,
     pub num: i32,
     pub kind: Ab,
     pub breakable: bool,
     pub cantsuppress: bool,
     pub callbacks: Vec<String>,
+    pub hooks: Hooks,
     pub unsupported: Vec<String>,
 }
 
+#[derive(Debug)]
 pub struct Dex {
     pub format: String,
     pub chart: TypeChart,
@@ -537,6 +682,9 @@ pub struct Dex {
     pub moves: Vec<MoveData>,
     pub items: Vec<ItemData>,
     pub abilities: Vec<AbilityData>,
+    /// `items[i].kind` / `abilities[i].kind` packed densely for the rule hot path.
+    pub item_kinds: Vec<It>,
+    pub ability_kinds: Vec<Ab>,
     pub species_by_id: HashMap<String, SpeciesId>,
     pub move_by_id: HashMap<String, MoveId>,
     pub item_by_id: HashMap<String, ItemId>,
@@ -547,6 +695,10 @@ pub struct Dex {
     pub confusion_hit: MoveId,
     /// Nature id -> (raised stat, lowered stat) as stat indices.
     pub natures: HashMap<String, (Option<usize>, Option<usize>)>,
+    /// `Cond` ids ranked with every move, item and ability id in id order (ties.rs).
+    pub cond_rank: [u16; Cond::N],
+    /// The tie whitelist compiled on those ranks.
+    pub whitelist: crate::battle::ties::Whitelist,
 }
 
 static DEX: OnceLock<Dex> = OnceLock::new();
@@ -677,6 +829,12 @@ impl Dex {
                 weight_hg: (n(sp, "weightkg") * 10.0).round() as u32,
                 abilities,
                 is_mega: b(sp, "isMega"),
+                gender: match s(sp, "gender").as_str() {
+                    "M" => 1,
+                    "F" => 2,
+                    "N" => 0,
+                    _ => crate::teams::GENDER_RANDOM,
+                },
             });
         }
 
@@ -733,9 +891,11 @@ impl Dex {
                 is_berry: b(it, "isBerry"),
                 is_mega_stone,
                 fling_bp: it.get("fling").map(|f| n(f, "basePower") as u16).unwrap_or(0),
+                hooks: Hooks::parse(it, &callbacks),
                 callbacks,
                 unsupported,
                 id,
+                rank: 0,
             });
         }
 
@@ -755,9 +915,11 @@ impl Dex {
                 kind,
                 breakable: fl.map(|f| b(f, "breakable")).unwrap_or(false),
                 cantsuppress: fl.map(|f| b(f, "cantsuppress")).unwrap_or(false),
+                hooks: Hooks::parse(ab, &callbacks),
                 callbacks,
                 unsupported,
                 id,
+                rank: 0,
             });
         }
 
@@ -774,14 +936,47 @@ impl Dex {
             natures.insert(s(n, "id"), (stat_index(&s(n, "plus")), stat_index(&s(n, "minus"))));
         }
 
+        // Effect ranks: every id that can hold an event handler, in id order (ties.rs).
+        let mut ids: Vec<String> = moves
+            .iter()
+            .map(|x| x.id.clone())
+            .chain(items.iter().map(|x| x.id.clone()))
+            .chain(abilities.iter().map(|x| x.id.clone()))
+            .chain(Cond::IDS.iter().map(|x| x.to_string()))
+            .chain(crate::battle::ties::WHITELIST.iter().flat_map(|(_, ids, _)| ids.iter().map(|x| x.to_string())))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let rank = |s: &str| ids.binary_search_by(|x| x.as_str().cmp(s)).expect("ranked id") as u16;
+        for x in &mut moves {
+            x.rank = rank(&x.id);
+        }
+        for x in &mut items {
+            x.rank = rank(&x.id);
+        }
+        for x in &mut abilities {
+            x.rank = rank(&x.id);
+        }
+        let mut cond_rank = [0u16; Cond::N];
+        for (k, id) in Cond::IDS.iter().enumerate() {
+            cond_rank[k] = rank(id);
+        }
+        let whitelist = crate::battle::ties::Whitelist::compile(&rank);
+
+        let item_kinds = items.iter().map(|x| x.kind).collect();
+        let ability_kinds = abilities.iter().map(|x| x.kind).collect();
         Ok(Dex {
             natures,
+            cond_rank,
+            whitelist,
             format,
             chart,
             species,
             moves,
             items,
             abilities,
+            item_kinds,
+            ability_kinds,
             species_by_id,
             move_by_id,
             item_by_id,
@@ -809,11 +1004,16 @@ impl Dex {
     }
     #[inline]
     pub fn it(&self, id: ItemId) -> It {
-        self.items[id as usize].kind
+        self.item_kinds[id as usize]
     }
     #[inline]
     pub fn ab(&self, id: AbilityId) -> Ab {
-        self.abilities[id as usize].kind
+        self.ability_kinds[id as usize]
+    }
+    /// The effect rank of a condition id.
+    #[inline]
+    pub fn cr(&self, c: Cond) -> u16 {
+        self.cond_rank[c as usize]
     }
     pub fn move_id(&self, s: &str) -> Option<MoveId> {
         self.move_by_id.get(s).copied()
@@ -997,8 +1197,10 @@ fn parse_move(mv: &Value) -> MoveData {
         foul_play: s(mv, "overrideOffensivePokemon") == "target",
         has_sheer_force_boost: b(mv, "hasSheerForceBoost"),
         fx,
+        base_power_cb: callbacks.iter().any(|c| c == "onBasePower"),
         callbacks,
         unsupported,
         id,
+        rank: 0,
     }
 }

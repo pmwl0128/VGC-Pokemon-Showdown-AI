@@ -63,7 +63,7 @@ fn expected_damage(b: &Battle, p: Pos, ms: usize, t: Pos) -> f32 {
     if sim.type_immune(p, am.ty, t, &am) {
         return 0.0;
     }
-    let dmg = sim.calc_damage(p, t, &am, false, 7).unwrap_or(0) as f32;
+    let dmg = sim.calc_damage(p, t, &am, false, Some(7)).unwrap_or(0) as f32;
     let hp = sim.m(t).hp.max(1) as f32;
     let acc = if mv.accuracy == 0 { 1.0 } else { mv.accuracy as f32 / 100.0 };
     (dmg / hp).min(1.0) * acc

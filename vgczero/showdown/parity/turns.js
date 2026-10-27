@@ -424,6 +424,8 @@ async function main() {
 	console.log(`showdown: ${scenarios.length} x ${RUNS} runs in ${((Date.now() - t1) / 1000).toFixed(1)}s`);
 	const t2 = Date.now();
 	const en = L.runEngine(['turn', String(RUNS)], scenarios.map(s => ({ id: s.id, state: s.state, choices: s.engineChoices, seed: s.runSeed })));
+	// The cached-speed diagnostic is compared only by exact.js.
+	for (const r of en) for (const k of Object.keys(r.counts || {})) if (k.endsWith('.spdc')) delete r.counts[k];
 	const enById = new Map(en.map(r => [r.id, r]));
 	console.log(`engine: ${scenarios.length} x ${RUNS} runs in ${((Date.now() - t2) / 1000).toFixed(1)}s`);
 

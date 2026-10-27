@@ -34,12 +34,15 @@ pub struct SetSpec {
     pub stats: [u16; 6],
     pub types: [Type; 2],
     pub weight_hg: u32,
-    /// 0 genderless, 1 male, 2 female.
+    /// 0 genderless, 1 male, 2 female, or `GENDER_RANDOM`: drawn when the battle starts.
     pub gender: u8,
     pub level: u8,
     pub mega: Option<MegaSpec>,
     pub alt: Option<AltForme>,
 }
+
+/// `SetSpec::gender` value for a gender that is drawn at battle start.
+pub const GENDER_RANDOM: u8 = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct TeamSpec {
@@ -104,10 +107,13 @@ pub fn parse_set(m: &Value, why: &mut Vec<String>) -> SetSpec {
             }
         }
     }
+    // Pinned sim/pokemon.ts: set gender (M/F/N), else the species' fixed gender, else
+    // battle.sample(['M', 'F']) while the Pokemon is constructed.
     let gender = match m.get("gender").and_then(|x| x.as_str()).unwrap_or("") {
         "M" => 1,
         "F" => 2,
-        _ => 0,
+        "N" => 0,
+        _ => d.sp(species).gender,
     };
     let mega = m.get("mega").filter(|x| !x.is_null()).map(|mg| {
         let msid = mg.get("species").and_then(|x| x.as_str()).unwrap_or("");

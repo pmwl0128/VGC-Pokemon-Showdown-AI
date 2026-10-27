@@ -2,7 +2,7 @@
 //! weather/terrain and Mega Evolution.
 
 use super::{blog, Battle};
-use crate::dex::{dex, Boosts, Category, Status, Terrain, VolKind, Weather, B_ACC, B_ATK, B_DEF, B_SPA, B_SPE, B_SPD};
+use crate::dex::{Boosts, Category, Status, Terrain, VolKind, Weather, B_ACC, B_ATK, B_DEF, B_SPA, B_SPE, B_SPD};
 use crate::kinds::{Ab, It};
 use crate::state::{Pos, ProtectKind};
 use crate::types::Type;
@@ -211,8 +211,8 @@ impl Battle {
     pub fn intimidate(&mut self, src: Pos) {
         self.reveal_ability(src);
         blog!(self, "|-ability|{}|Intimidate|boost", self.name(src));
-        let foes: Vec<Pos> = self.live_foes(src).collect();
-        for t in foes {
+        let foes: crate::fixed::FixedVec<Pos, 2> = self.live_foes(src).collect();
+        for &t in &foes {
             if self.m(t).vol.substitute > 0 {
                 continue;
             }
@@ -245,6 +245,8 @@ impl Battle {
             Status::Par if m.has_type(Type::Electric) => return true,
             Status::Brn if m.has_type(Type::Fire) => return true,
             Status::Frz if m.has_type(Type::Ice) => return true,
+            // Sunny Day's onImmunity.
+            Status::Frz if self.weather() == Weather::Sun => return true,
             Status::Psn | Status::Tox if (m.has_type(Type::Poison) || m.has_type(Type::Steel)) && !corrosion => {
                 return true
             }
@@ -495,6 +497,24 @@ impl Battle {
                 self.mm(tgt).vol.tar_shot = true;
             }
             VolKind::SmackDown => {
+                // The volatile only starts on a Pokemon that is in the air.
+                let m = self.m(tgt);
+                let mut applies = (m.has_type(Type::Flying) || self.ab(tgt) == Ab::Levitate)
+                    && !(self.it(tgt) == It::IronBall || m.vol.ingrain || self.field.gravity > 0);
+                if m.vol.semi_inv == crate::state::SemiInv::Air {
+                    // Knocked out of Fly / Bounce: the move is cancelled.
+                    applies = true;
+                    let mm = self.mm(tgt);
+                    mm.vol.semi_inv = crate::state::SemiInv::None;
+                    mm.vol.charging = 0;
+                    self.queue.remove_where(|a| a.pos == tgt && matches!(a.kind, super::ActionKind::Move { .. }));
+                }
+                if self.m(tgt).vol.magnet_rise > 0 {
+                    applies = true;
+                }
+                if !applies {
+                    return false;
+                }
                 let m = self.mm(tgt);
                 m.vol.smacked_down = true;
                 m.vol.magnet_rise = 0;
@@ -510,7 +530,12 @@ impl Battle {
                 if sg == 0 || tg == 0 || sg == tg || self.m(tgt).vol.attract || tab == Ab::Oblivious {
                     return false;
                 }
-                self.mm(tgt).vol.attract = true;
+                let s = src.unwrap();
+                let mon = self.sides[s.s()].active[s.i()];
+                let v = &mut self.mm(tgt).vol;
+                v.attract = true;
+                v.attract_src = s.code();
+                v.attract_mon = mon;
             }
             VolKind::Stockpile => {
                 if self.m(tgt).vol.stockpile >= 3 {
@@ -637,60 +662,72 @@ impl Battle {
         }
     }
 
-    /// Does an Update-event item check have anything to do for `p`?
-    #[inline]
-    fn update_pending(&self, p: Pos) -> bool {
-        if !self.is_live(p) {
+    /// update_items(p) may change something: a superset of its conditions (attract, a
+    /// healing berry at half HP or less, a status berry with a status or confusion). Must be
+    /// widened whenever update_items gains a check.
+    pub(crate) fn update_can_act(&self, m: &crate::state::Mon) -> bool {
+        if m.vol.attract {
+            return true;
+        }
+        if m.item == 0 {
             return false;
         }
-        let m = self.m(p);
-        match self.it(p) {
+        match self.dex.it(m.item) {
             It::SitrusBerry | It::OranBerry => (m.hp as u32) * 2 <= m.max_hp as u32,
-            It::LumBerry => m.status != Status::None || m.vol.confusion > 0,
-            It::ChestoBerry => m.status == Status::Slp,
-            It::CheriBerry => m.status == Status::Par,
-            It::PechaBerry => matches!(m.status, Status::Psn | Status::Tox),
-            It::RawstBerry => m.status == Status::Brn,
-            It::AspearBerry => m.status == Status::Frz,
-            It::PersimBerry => m.vol.confusion > 0,
+            It::LumBerry | It::ChestoBerry | It::CheriBerry | It::PechaBerry | It::RawstBerry | It::AspearBerry | It::PersimBerry => {
+                m.status != Status::None || m.vol.confusion > 0
+            }
             _ => false,
-        }
-    }
-
-    /// eachEvent('Update') over the active Pokemon, in speed order.
-    pub(crate) fn update_all(&mut self) {
-        let mut ps: [(i32, Pos); 4] = [(0, Pos::new(0, 0)); 4];
-        let mut n = 0;
-        for c in 0..4 {
-            let p = Pos::from_code(c);
-            if self.update_pending(p) {
-                ps[n] = (0, p);
-                n += 1;
-            }
-        }
-        if n > 1 {
-            for k in 0..n {
-                ps[k].0 = self.action_speed(ps[k].1);
-            }
-            ps[..n].sort_by(|a, b| b.0.cmp(&a.0));
-        }
-        for k in 0..n {
-            self.update_items(ps[k].1);
         }
     }
 
     /// All Update-event item checks for one Pokemon.
     pub fn update_items(&mut self, p: Pos) {
+        // attract's onUpdate (a condition, before the item): it ends once its source is
+        // no longer active.
+        let v = &self.m(p).vol;
+        if v.attract {
+            let s = Pos::from_code(v.attract_src);
+            let i = self.sides[s.s()].active[s.i()];
+            if i != v.attract_mon || self.sides[s.s()].mons[i as usize].fainted {
+                self.mm(p).vol.attract = false;
+            }
+        }
+        if self.m(p).item == 0 {
+            return;
+        }
         self.check_hp_berry(p);
-        self.check_status_berry(p);
+        // A consumed HP berry may be replaced by Symbiosis, so inspect the current
+        // state after that handler rather than caching the held item across it.
+        if self.m(p).status != Status::None || self.m(p).vol.confusion > 0 {
+            self.check_status_berry(p);
+        }
     }
 
-    /// White Herb has no Update handler: it acts after any switch-in, any
-    /// move, any Mega Evolution, and at the end of the turn, for every active
-    /// holder (so two Intimidates in a row are both undone).
-    pub(crate) fn white_herb_all(&mut self) {
-        for c in 0..4 {
-            self.check_white_herb(Pos::from_code(c));
+    /// runEvent('AfterMove' / 'AfterMega', user): White Herb's onAnyAfterMove /
+    /// onAnyAfterMega on every active holder, sorted by cached speed (equal speeds shuffle).
+    /// The user's Charge volatile (onAfterMove) only takes its place in the sort.
+    pub(crate) fn white_herb_event(&mut self, user: Pos, after_move: bool) {
+        let mut h = [(0i32, 0u8, 0u8); 6];
+        let mut n = 0;
+        if after_move && self.m(user).vol.charge {
+            h[n] = (self.m(user).speed, 2, 4);
+            n += 1;
+        }
+        for q in [Pos::new(user.s(), 0), Pos::new(user.s(), 1), user.foe(0), user.foe(1)] {
+            if self.is_live(q) && self.m(q).item != 0 && self.dex.it(self.m(q).item) == It::WhiteHerb {
+                h[n] = (self.m(q).speed, 8, q.code());
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return;
+        }
+        crate::rng::speed_sort(&mut self.rng, &mut h[..n], |a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for &(_, _, c) in &h[..n] {
+            if c < 4 {
+                self.check_white_herb(Pos::from_code(c));
+            }
         }
     }
 
@@ -706,11 +743,21 @@ impl Battle {
             let m = self.mm(p);
             m.last_item = had;
             m.item = 0;
-            m.vol.choice_lock = 0;
             m.reveal.item = true;
         }
         if self.ab(p) == Ab::Unburden {
             self.mm(p).vol.unburden = true;
+        }
+    }
+
+    /// Showdown's setItem: the new item's onStart runs, and a Choice item's ends any
+    /// choicelock (a lock otherwise outlives the item that set it).
+    pub fn set_item(&mut self, p: Pos, it: crate::dex::ItemId) {
+        let choice = super::legal::is_choice(self.dex.it(it));
+        let m = self.mm(p);
+        m.item = it;
+        if choice {
+            m.vol.choice_lock = 0;
         }
     }
 
@@ -721,19 +768,18 @@ impl Battle {
             return None;
         }
         let it = self.m(p).item;
-        if it == 0 || dex().item(it).is_mega_stone {
+        if it == 0 || self.dex.item(it).is_mega_stone {
             return None;
         }
         {
             let m = self.mm(p);
             m.item = 0;
-            m.vol.choice_lock = 0;
             m.reveal.item = true;
         }
         if self.ab(p) == Ab::Unburden {
             self.mm(p).vol.unburden = true;
         }
-        blog!(self, "|-enditem|{}|{}|[silent]", self.name(p), dex().item(it).name);
+        blog!(self, "|-enditem|{}|{}|[silent]", self.name(p), self.dex.item(it).name);
         Some(it)
     }
 
@@ -751,11 +797,11 @@ impl Battle {
         if let Some(a) = self.live_ally(p) {
             if self.ab(a) == Ab::Symbiosis && self.m(a).item != 0 && self.m(p).item == 0 {
                 let it = self.m(a).item;
-                if dex().item(it).is_mega_stone {
+                if self.dex.item(it).is_mega_stone {
                     return;
                 }
                 self.mm(a).item = 0;
-                self.mm(p).item = it;
+                self.set_item(p, it);
                 self.reveal_ability(a);
             }
         }
@@ -771,6 +817,10 @@ impl Battle {
 
     pub fn faint(&mut self, p: Pos) {
         let name = self.name(p);
+        // faintMessages runs the ability's End before the Pokemon counts as fainted.
+        if matches!(self.ab(p), Ab::AirLock | Ab::CloudNine) {
+            self.each_event_draws();
+        }
         {
             let side = &mut self.sides[p.s()];
             side.total_fainted = side.total_fainted.saturating_add(1);
@@ -778,6 +828,7 @@ impl Battle {
             let m = side.mons.get_mut(side.active[p.i()] as usize).unwrap();
             m.fainted = true;
             m.hp = 0;
+            m.status_before_faint = m.status;
             m.status = Status::None;
             m.boosts = [0; 7];
             m.vol = Default::default();
@@ -785,6 +836,8 @@ impl Battle {
             m.ability = m.base_ability;
             m.types = m.base_types;
             m.revert_alt_forme();
+            // clearVolatile -> setSpecies(baseSpecies): the raw Speed stat.
+            m.speed = m.fainted_speed() as i32;
         }
         blog!(self, "|faint|{}", name);
         // The slot stays occupied by the fainted Pokemon until replaced.
@@ -803,6 +856,32 @@ impl Battle {
         self.field.weather = w;
         self.field.weather_turns = if rock { 8 } else { 5 };
         blog!(self, "|-weather|{:?}", w);
+        // eachEvent('WeatherChange').
+        self.each_event_draws();
+        true
+    }
+
+    /// Showdown's `field.clearWeather`: FieldEnd, then eachEvent('WeatherChange').
+    pub fn clear_weather(&mut self) -> bool {
+        if self.field.weather == Weather::None {
+            return false;
+        }
+        blog!(self, "|-weather|none");
+        self.field.weather = Weather::None;
+        self.field.weather_turns = 0;
+        self.each_event_draws();
+        true
+    }
+
+    /// Showdown's `field.clearTerrain`: FieldEnd, then eachEvent('TerrainChange').
+    pub fn clear_terrain(&mut self) -> bool {
+        if self.field.terrain == Terrain::None {
+            return false;
+        }
+        blog!(self, "|-fieldend|{:?}", self.field.terrain);
+        self.field.terrain = Terrain::None;
+        self.field.terrain_turns = 0;
+        self.each_event_draws();
         true
     }
 
@@ -813,9 +892,11 @@ impl Battle {
         self.field.terrain = t;
         self.field.terrain_turns = if self.it(src) == It::TerrainExtender { 8 } else { 5 };
         blog!(self, "|-fieldstart|{:?}", t);
+        // eachEvent('TerrainChange').
+        self.each_event_draws();
         // Seeds activate when their terrain starts.
-        let all: Vec<Pos> = self.live_positions().collect();
-        for p in all {
+        let all: crate::fixed::FixedVec<Pos, 4> = self.live_positions().collect();
+        for &p in &all {
             self.check_seed(p);
         }
         true
@@ -844,6 +925,7 @@ impl Battle {
         if !self.is_live(p) || !self.can_mega(p) {
             return;
         }
+        let d = self.dex;
         {
             let m = self.mm(p);
             m.species = m.mega_species;
@@ -855,15 +937,23 @@ impl Battle {
             m.weight_hg = m.mega_weight_hg;
             m.ability = m.mega_ability;
             m.base_ability = m.mega_ability;
+            // setAbility starts a fresh abilityState (Protean may change the type again);
+            // the old ability's End removes Flash Fire's volatile.
+            m.vol.protean = false;
+            if d.ab(m.mega_ability) != Ab::FlashFire {
+                m.vol.flash_fire = false;
+            }
             m.is_mega = true;
             m.reveal.item = true;
             m.reveal.ability = true;
+            // formeChange -> setSpecies: the raw Speed stat.
+            m.speed = m.stats[5] as i32;
         }
         self.sides[p.s()].mega_used = true;
         blog!(self, "|-mega|{}", self.name(p));
         // The new ability starts immediately.
         self.ability_start(p);
-        self.white_herb_all();
+        self.white_herb_event(p, false);
     }
 
     pub fn reveal_ability(&mut self, p: Pos) {

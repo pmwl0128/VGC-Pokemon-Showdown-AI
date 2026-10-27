@@ -2,7 +2,7 @@
 
 use super::{Battle, Phase};
 use crate::actions::{move_action, switch_action, PASS, T_ALLY, T_FOE0, T_FOE1};
-use crate::dex::{dex, flag, Category, MoveId, Target, Terrain};
+use crate::dex::{flag, Category, MoveId, Target, Terrain};
 use crate::kinds::{Ab, It, MoveFx};
 use crate::state::Pos;
 use crate::types::Type;
@@ -10,6 +10,7 @@ use crate::types::Type;
 impl Battle {
     /// Bitmask over the 31 slot actions for this side/slot right now.
     pub fn legal_mask(&self, side: usize, slot: usize) -> u32 {
+        crate::prof!("legal_mask");
         let p = Pos::new(side, slot);
         match self.phase {
             Phase::Move => {
@@ -37,6 +38,46 @@ impl Battle {
         }
     }
 
+    /// `legal_mask(side, slot)` has action `a`. In the move phase this checks the one action
+    /// instead of building the whole mask (validating a chosen action); a pass, which is legal
+    /// only when nothing else is, and the other phases use the mask.
+    pub fn action_legal(&self, side: usize, slot: usize, a: u8) -> bool {
+        let fast = self.action_legal_move_phase(side, slot, a);
+        debug_assert!(fast.is_none_or(|f| f == (self.legal_mask(side, slot) & (1u32 << (a & 31)) != 0)));
+        fast.unwrap_or_else(|| self.legal_mask(side, slot) & (1u32 << (a & 31)) != 0)
+    }
+
+    fn action_legal_move_phase(&self, side: usize, slot: usize, a: u8) -> Option<bool> {
+        use crate::actions::{decode, SlotAction};
+        if self.phase != Phase::Move {
+            return None;
+        }
+        let p = Pos::new(side, slot);
+        if !self.is_live(p) {
+            return Some(a == PASS);
+        }
+        let m = self.m(p);
+        if m.vol.must_recharge || m.vol.charging > 0 {
+            let s = if m.vol.charging > 0 { (m.vol.charging - 1) as usize } else { 0 };
+            return Some(a == move_action(s, T_FOE0, false));
+        }
+        match decode(a) {
+            SlotAction::Pass => None,
+            SlotAction::Switch(i) => Some(!self.is_trapped(p) && self.sides[side].can_switch_to(i as usize)),
+            SlotAction::Move { slot: s, target, mega } => {
+                let s = s as usize;
+                let imprison = self.foe_imprison(p);
+                if s < m.n_moves as usize && !self.move_disabled_with(p, s, imprison) {
+                    Some(self.move_targets(p, m.moves[s]).any(|t| t == target) && (!mega || self.can_mega(p)))
+                } else {
+                    // Only Struggle (every move unusable) is offered, as move 0 without Mega.
+                    let struggle = (0..m.n_moves as usize).all(|k| self.move_disabled_with(p, k, imprison));
+                    Some(struggle && a == move_action(0, T_FOE0, false))
+                }
+            }
+        }
+    }
+
     fn move_phase_mask(&self, p: Pos) -> u32 {
         let m = self.m(p);
         let mut mask = 0u32;
@@ -46,12 +87,17 @@ impl Battle {
             return 1 << move_action(s, T_FOE0, false);
         }
         let can_mega = self.can_mega(p);
-        if self.must_struggle(p) {
-            // Struggle counts as a locked move: no Mega Evolution.
+        let mut usable = [false; 4];
+        let imprison = self.foe_imprison(p);
+        for s in 0..m.n_moves as usize {
+            usable[s] = !self.move_disabled_with(p, s, imprison);
+        }
+        if !usable.iter().any(|&u| u) {
+            // must_struggle. Struggle counts as a locked move: no Mega Evolution.
             mask |= 1 << move_action(0, T_FOE0, false);
         } else {
             for s in 0..m.n_moves as usize {
-                if self.move_disabled(p, s) {
+                if !usable[s] {
                     continue;
                 }
                 let mid = m.moves[s];
@@ -78,7 +124,7 @@ impl Battle {
 
     /// Target choices (encoded 0/1/2) offered for a move.
     pub fn move_targets(&self, p: Pos, mid: MoveId) -> impl Iterator<Item = u8> {
-        let mv = dex().mv(mid);
+        let mv = self.dex.mv(mid);
         let mut out = [false; 3];
         match mv.target {
             Target::Normal | Target::Any | Target::AdjacentFoe => {
@@ -111,7 +157,7 @@ impl Battle {
 
     pub fn can_mega(&self, p: Pos) -> bool {
         let m = self.m(p);
-        m.can_mega && !m.is_mega && !self.sides[p.s()].mega_used && m.item != 0 && dex().item(m.item).is_mega_stone
+        m.can_mega && !m.is_mega && !self.sides[p.s()].mega_used && m.item != 0 && self.dex.item(m.item).is_mega_stone
     }
 
     /// True if every move is unusable.
@@ -122,12 +168,22 @@ impl Battle {
 
     /// Is move slot `s` unusable this turn?
     pub fn move_disabled(&self, p: Pos, s: usize) -> bool {
+        self.move_disabled_with(p, s, self.foe_imprison(p))
+    }
+
+    /// A living foe holds Imprison.
+    fn foe_imprison(&self, p: Pos) -> bool {
+        self.live_foes(p).any(|q| self.m(q).vol.imprison)
+    }
+
+    /// move_disabled with `foe_imprison(p)` already known (one test for all four slots).
+    fn move_disabled_with(&self, p: Pos, s: usize, imprison: bool) -> bool {
         let m = self.m(p);
         if s >= m.n_moves as usize || m.pp[s] == 0 {
             return true;
         }
         let mid = m.moves[s];
-        let mv = dex().mv(mid);
+        let mv = self.dex.mv(mid);
         let v = &m.vol;
         if v.encore > 0 && v.encore_slot as usize != s {
             return true;
@@ -162,6 +218,9 @@ impl Battle {
         }
         // Imprison (onFoeDisableMove): a foe with Imprison that knows this move.
         // (Within the turn Imprison starts, the move fails at BeforeMove.)
+        if !imprison {
+            return false;
+        }
         for q in self.live_foes(p) {
             let f = self.m(q);
             if f.vol.imprison && f.moves[..f.n_moves as usize].contains(&mid) {
@@ -193,7 +252,7 @@ impl Battle {
 
     /// ModifyPriority: Prankster, Gale Wings, Triage, Grassy Glide.
     pub fn modify_priority(&self, p: Pos, mid: MoveId, base: i8) -> i8 {
-        let mv = dex().mv(mid);
+        let mv = self.dex.mv(mid);
         let m = self.m(p);
         let mut pr = base;
         match mv.fx {
@@ -230,25 +289,27 @@ impl Battle {
         let mut c = Choice::slots(PASS, PASS);
         let mut used = [false; 6];
         let mut mega = false;
-        let mut opts = [0u8; 31];
         for slot in 0..2 {
-            let mask = self.legal_mask(side, slot);
-            let mut n = 0;
-            for a in 0..31u8 {
-                if mask & (1 << a) == 0 {
-                    continue;
-                }
-                let ok = match decode(a) {
-                    SlotAction::Switch(t) => !used[t as usize],
-                    SlotAction::Move { mega: m, .. } => !(m && mega),
-                    SlotAction::Pass => true,
-                };
-                if ok {
-                    opts[n] = a;
-                    n += 1;
+            let mut mask = self.legal_mask(side, slot);
+            for (t, &taken) in used.iter().enumerate() {
+                if taken {
+                    mask &= !(1 << switch_action(t));
                 }
             }
-            let a = if n == 0 { PASS } else { opts[rng.below(n as u32) as usize] };
+            if mega {
+                // Mega moves are the even action ids 8, 10, ..., 30.
+                mask &= !0x5555_5500;
+            }
+            let a = if mask == 0 {
+                PASS
+            } else {
+                let rank = rng.below(mask.count_ones());
+                // Enumerate set bits in the same ascending order as the action menu.
+                for _ in 0..rank {
+                    mask &= mask - 1;
+                }
+                mask.trailing_zeros() as u8
+            };
             match decode(a) {
                 SlotAction::Switch(t) => used[t as usize] = true,
                 SlotAction::Move { mega: true, .. } => mega = true,

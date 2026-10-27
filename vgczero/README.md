@@ -1,5 +1,20 @@
 # vgczero
 
+> **Quark Drive fork (branch `quark-drive/engine`).** `core/`, `engine/` and `showdown/` are the
+> engine as developed and verified inside the Quark Drive Pokémon Champions repository
+> (`model_train/fast_engine/` there keeps a trimmed copy and runs the parity harness against that
+> track's pinned Showdown build with a tie-determinizing patch). Relative to upstream the engine
+> follows the pinned Showdown's target resolution, turn loop, cached speeds and handler sorts,
+> adds a Showdown-compatible RNG mode (`core/src/rng.rs`), the exact same-seed harness
+> (`showdown/parity/exact.js`) and the performance work recorded in the Quark Drive status notes.
+> In this standalone tree: `cargo build --release` and `cargo test` work from `engine/`
+> (workspace target in `vgczero/target`; data in `vgczero/data` as `dex.json.gz` /
+> `teams.json.gz`, `FAST_ENGINE_DATA` overrides); `showdown/export_dex.js`, `damage.js` and
+> `turns.js` run on a built Showdown (`PS_DIR`); `exact.js` and the whitelist test in
+> `engine/src/battle/ties.rs` need the Quark Drive repository's patched oracle and receipts;
+> `compile_teams.js` reads that repository's prepared team pools; the Python training stack
+> below has not been re-run against this engine.
+
 Self-play reinforcement learning for **[Gen 9 Champions] VGC 2026 Reg M-C**
 doubles, modelled on mikumiku37 and Jaxcalibur: a Rust battle engine ~690x
 faster than Showdown, a ~8M-parameter entity transformer trained from scratch

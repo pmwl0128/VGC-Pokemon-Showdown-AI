@@ -15,11 +15,11 @@ const zlib = require('zlib');
 const cp = require('child_process');
 
 const HERE = __dirname;
-const ROOT = path.join(HERE, '..', '..');
-const PS_DIR = process.env.PS_DIR || path.join(HERE, '..', 'ps');
-const FORMAT = process.env.FORMAT || 'gen9championsvgc2026regmc';
-const ENGINE_DIR = path.join(ROOT, 'engine');
-const PARITY_BIN = process.env.PARITY_BIN || path.join(ENGINE_DIR, 'target', 'release', 'parity');
+const pinned = require('../pinned');
+const ROOT = pinned.root;
+const { PS_DIR, FORMAT, ENGINE_DIR } = pinned;
+const PARITY_BIN = process.env.PARITY_BIN ||
+	path.join(pinned.TARGET_DIR, 'release', process.platform === 'win32' ? 'parity.exe' : 'parity');
 
 const sim = require(path.join(PS_DIR, 'dist', 'sim'));
 const { State } = require(path.join(PS_DIR, 'dist', 'sim', 'state'));
@@ -68,7 +68,7 @@ function readJsonGz(file) {
 
 let POOL = null;
 function loadPool() {
-	if (!POOL) POOL = readJsonGz(path.join(ROOT, 'data', 'teams_regmc.json.gz')).teams;
+	if (!POOL) POOL = readJsonGz(pinned.TEAMS_FILE).teams;
 	return POOL;
 }
 
@@ -190,6 +190,9 @@ function exportMon(battle, side, p) {
 		species: p.species.id,
 		base_species: p.baseSpecies.id,
 		is_mega: !!p.species.isMega,
+		gender: p.gender,
+		speed: p.speed,
+		skip_before_switch_out: !!p.skipBeforeSwitchOutEventFlag,
 		ability: p.ability,
 		base_ability: p.baseAbility,
 		ability_state: effectState(p.abilityState),
@@ -283,6 +286,7 @@ function exportQueue(battle) {
 		if (a.choice === 'move') {
 			e.move = a.move.id;
 			e.target_loc = a.targetLoc;
+			e.orig = a.originalTarget ? a.originalTarget.side.n * 6 + teamIdx(a.originalTarget) : 255;
 			e.fractional_priority = a.fractionalPriority || 0;
 			e.mega = !!a.mega;
 		}

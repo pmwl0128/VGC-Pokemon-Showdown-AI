@@ -9,21 +9,19 @@
 // handlers it implements, so "supported" is checked, not assumed.
 //
 // Usage: node vgczero/showdown/export_dex.js [--out vgczero/data/dex_regmc.json.gz]
-//        PS_DIR=/path/to/pokemon-showdown (default vgczero/showdown/ps)
+//        Always reads this track's pinned Showdown build (see pinned.js).
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 
-const HERE = __dirname;
-const PS_DIR = process.env.PS_DIR || path.join(HERE, 'ps');
-const FORMAT = process.env.FORMAT || 'gen9championsvgc2026regmc';
+const { PS_DIR, FORMAT, pin, buildHash, DEX_FILE } = require('./pinned');
 
 function arg(name, dflt) {
 	const i = process.argv.indexOf(name);
 	return i >= 0 ? process.argv[i + 1] : dflt;
 }
-const OUT = arg('--out', path.join(HERE, '..', 'data', 'dex_regmc.json.gz'));
+const OUT = arg('--out', DEX_FILE);
 
 const { Dex } = require(path.join(PS_DIR, 'dist', 'sim'));
 const dex = Dex.forFormat(FORMAT);
@@ -144,12 +142,9 @@ const out = {
 		formatName: format.name,
 		mod: dex.currentMod,
 		gen: dex.gen,
-		showdownCommit: (() => {
-			try {
-				return require('child_process').execSync('git rev-parse HEAD', { cwd: PS_DIR }).toString().trim();
-			} catch { return null; }
-		})(),
-		exportedAt: new Date().toISOString(),
+		// Identity of the pinned build; no timestamps, so the export is byte-reproducible.
+		showdownCommit: pin,
+		showdownBuildSha256: buildHash,
 	},
 	types,
 	typechart,

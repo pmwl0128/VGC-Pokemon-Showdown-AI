@@ -66,6 +66,9 @@ pub struct Vol {
     pub substitute: u16,
     /// Charging a two-turn move: slot + 1 (0 = not charging).
     pub charging: u8,
+    /// The two-turn move attacked this turn: its twoturnmove volatile lingers (and joins the
+    /// Residual sort) until the residual ends it.
+    pub twoturn_spent: bool,
     pub charge_target: i8,
     pub semi_inv: SemiInv,
     pub must_recharge: bool,
@@ -91,6 +94,9 @@ pub struct Vol {
     pub charge: bool,
     pub stockpile: u8,
     pub attract: bool,
+    /// Who caused the attraction (position code, team index): it ends once they leave.
+    pub attract_src: u8,
+    pub attract_mon: u8,
     pub no_retreat: bool,
     pub laser_focus: u8,
     pub tar_shot: bool,
@@ -128,6 +134,8 @@ pub struct Vol {
     pub last_damage_src: u8,
     /// Switch out at the end of the current action (U-turn, Emergency Exit...).
     pub switch_flag: bool,
+    /// BeforeSwitchOut already ran for this pending switch (skipBeforeSwitchOutEventFlag).
+    pub skip_before_switch_out: bool,
     pub switch_copyvolatile: bool,
     pub switch_shedtail: bool,
     /// Forced out by Red Card / Roar (random replacement).
@@ -163,11 +171,17 @@ pub struct Mon {
     pub hp: u16,
     pub max_hp: u16,
     pub status: Status,
+    /// Status at the moment it fainted (Showdown keeps it until checkFainted).
+    pub status_before_faint: Status,
     /// Sleep/freeze turns remaining, or toxic counter.
     pub status_turns: u8,
     pub boosts: Boosts,
     pub vol: Vol,
     pub fainted: bool,
+    /// Showdown's cached `pokemon.speed`: the raw Speed stat after construction, switch-out,
+    /// fainting or a forme change; the action speed after each updateSpeed. Handler and
+    /// eachEvent sorts use it, not the live speed.
+    pub speed: i32,
     /// Brought to battle (chosen at team preview).
     pub brought: bool,
     /// Slot (0/1) if on the field.
@@ -231,6 +245,8 @@ impl Mon {
             max_pp: pp,
             n_moves: set.n_moves,
             hp: set.stats[0],
+            status_before_faint: Status::None,
+            speed: set.stats[5] as i32,
             max_hp: set.stats[0],
             status: Status::None,
             status_turns: 0,
@@ -293,9 +309,16 @@ impl Mon {
             }
             self.weight_hg = self.home_weight_hg;
         }
+        // setSpecies resets the cached speed to the new raw Speed stat.
+        self.speed = self.stats[5] as i32;
     }
 
     /// Back to the set's forme unless the change was permanent (switch-out, faint).
+    /// The raw Speed of a fainted Pokemon (Champions keeps a Mega's forme after fainting).
+    pub fn fainted_speed(&self) -> u32 {
+        self.stats[5] as u32
+    }
+
     pub fn revert_alt_forme(&mut self) {
         if self.alt_species != 0 && self.species == self.alt_species && !self.alt_locked {
             self.set_alt_forme(false);
@@ -401,8 +424,11 @@ impl Side {
         }
     }
 
-    pub fn alive_brought(&self) -> u8 {
-        self.mons.iter().filter(|m| m.brought && m.alive()).count() as u8
+    /// A brought Pokemon is still alive (the active ones checked first: usually one of
+    /// them settles it).
+    pub fn any_alive_brought(&self) -> bool {
+        let ok = |m: &Mon| m.brought && m.alive();
+        self.mon(0).is_some_and(ok) || self.mon(1).is_some_and(ok) || self.mons.iter().any(ok)
     }
 }
 
@@ -428,13 +454,17 @@ impl Pos {
     pub fn new(side: usize, slot: usize) -> Pos {
         Pos { side: side as u8, slot: slot as u8 }
     }
+    /// Side index. Positions only ever hold side 0/1 and slot 0/1; the mask lets array
+    /// indexing by them skip the bounds check.
     #[inline]
     pub fn s(self) -> usize {
-        self.side as usize
+        debug_assert!(self.side < 2);
+        (self.side & 1) as usize
     }
     #[inline]
     pub fn i(self) -> usize {
-        self.slot as usize
+        debug_assert!(self.slot < 2);
+        (self.slot & 1) as usize
     }
     #[inline]
     pub fn ally(self) -> Pos {

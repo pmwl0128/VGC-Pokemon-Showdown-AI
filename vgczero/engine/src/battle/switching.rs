@@ -2,7 +2,7 @@
 
 use super::effects::{BoostSrc, DmgKind};
 use super::{blog, Battle};
-use crate::dex::{dex, Status, Terrain, Weather, B_SPE};
+use crate::dex::{Status, Terrain, Weather, B_SPE};
 use crate::kinds::{Ab, It};
 use crate::state::{Pos, Vol};
 use crate::types::Type;
@@ -26,7 +26,7 @@ impl Battle {
             let alive = self.sides[s].mons[oi].alive();
             if alive {
                 // Switch-out abilities.
-                let ab = dex().ab(self.sides[s].mons[oi].ability);
+                let ab = self.dex.ab(self.sides[s].mons[oi].ability);
                 {
                     let m = &mut self.sides[s].mons[oi];
                     match ab {
@@ -48,6 +48,11 @@ impl Battle {
                         _ => {}
                     }
                 }
+                // The ability's End (Air Lock / Cloud Nine: eachEvent('WeatherChange')) while
+                // the Pokemon is still in.
+                if matches!(ab, Ab::AirLock | Ab::CloudNine) {
+                    self.each_event_draws();
+                }
                 let m = &self.sides[s].mons[oi];
                 if m.vol.switch_copyvolatile {
                     baton = Some((m.boosts, m.vol));
@@ -62,6 +67,8 @@ impl Battle {
             if !m.fainted {
                 m.boosts = [0; 7];
                 m.vol = Vol::default();
+                // clearVolatile -> setSpecies: the raw Speed stat.
+                m.speed = m.stats[5] as i32;
                 // Types / ability revert on switch-out (megas stay mega);
                 // a non-permanent battle forme reverts (Aegislash-Blade).
                 m.types = m.base_types;
@@ -110,11 +117,23 @@ impl Battle {
             return;
         }
         let s = p.s();
-        let options: Vec<usize> = (0..6).filter(|&i| self.sides[s].can_switch_to(i)).collect();
-        if options.is_empty() {
+        // getRandomSwitchable: the unfainted brought Pokemon behind the actives, party order.
+        let mut options = [0usize; 4];
+        let mut n = 0;
+        for &i in &self.sides[s].order[2..4] {
+            if self.sides[s].can_switch_to(i as usize) {
+                options[n] = i as usize;
+                n += 1;
+            }
+        }
+        if n == 0 {
             return;
         }
-        let to = options[self.rng.below(options.len() as u32) as usize];
+        let to = options[self.rng.below(n as u32) as usize];
+        // switchIn(isDrag): the dragged-out Pokemon's queued actions are cancelled and
+        // runSwitch happens at once.
+        let old = self.sides[s].active[p.i()];
+        self.queue.remove_where(|a| a.pos == p && a.mon == old);
         self.switch_out_in(p, to);
         self.run_switch_in(&[p]);
     }
@@ -122,14 +141,19 @@ impl Battle {
     /// Run switch-in effects for Pokemon that just entered, in Showdown's
     /// order: handlers sorted by priority, then speed (ties resolved once).
     pub fn run_switch_in(&mut self, switchers: &[Pos]) {
-        let mut live: Vec<Pos> = switchers.iter().copied().filter(|&p| self.is_live(p)).collect();
+        crate::prof!("run_switch_in");
+        let mut live: crate::fixed::FixedVec<Pos, 4> = switchers.iter().copied().filter(|&p| self.is_live(p)).collect();
         if live.is_empty() {
             return;
         }
-        // Resolve speed order once (random tiebreaks), like speedOrder.
-        let mut keyed: Vec<(i32, u32, Pos)> = live.iter().map(|&p| (self.action_speed(p), self.rng.next_u64() as u32, p)).collect();
-        keyed.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        live = keyed.into_iter().map(|x| x.2).collect();
+        // speedOrder: speedSort(getAllActive(true)) by cached speed, fainted included.
+        let mut all: crate::fixed::FixedVec<(i32, Pos), 4> = (0..4u8)
+            .map(Pos::from_code)
+            .filter(|&q| self.sides[q.s()].active[q.i()] != crate::state::NO_MON)
+            .map(|q| (self.m(q).speed, q))
+            .collect();
+        crate::rng::speed_sort(&mut self.rng, &mut all, |a, b| b.0.cmp(&a.0));
+        live.sort_by_key(|&q| all.iter().position(|x| x.1 == q).unwrap_or(usize::MAX));
 
         // Priority > 0: Healing Wish (slot condition).
         for &p in &live {
@@ -143,29 +167,29 @@ impl Battle {
                 }
             }
         }
-        // Hazards.
+        // Priority 0, one switcher at a time in speedOrder: hazards (side conditions, subOrder
+        // 4), the ability (7), the item (8). Seeds (priority -1) follow for everyone.
         for &p in &live {
             self.entry_hazards(p);
-        }
-        // Abilities (priority 0), in speed order.
-        for &p in &live {
+            self.process_faints();
             if self.is_live(p) {
                 self.ability_start(p);
+                self.process_faints();
             }
-        }
-        // Items (seeds have onSwitchInPriority -1, after abilities).
-        for &p in &live {
-            if self.is_live(p) {
+            if self.is_live(p) && self.it(p) == It::AirBalloon {
                 self.item_start(p);
             }
         }
         for &p in &live {
-            if self.is_live(p) {
-                self.update_items(p);
+            if self.is_live(p) && matches!(self.it(p), It::GrassySeed | It::PsychicSeed | It::ElectricSeed | It::MistySeed) {
+                self.item_start(p);
             }
         }
-        // White Herb (onAnySwitchIn, priority -2).
-        self.white_herb_all();
+        // White Herb (onAnySwitchIn, priority -2): one handler per active holder, in
+        // speedOrder (the fractional speeds rule out ties).
+        for &(_, q) in &all {
+            self.check_white_herb(q);
+        }
     }
 
     fn entry_hazards(&mut self, p: Pos) {
@@ -262,11 +286,12 @@ impl Battle {
             }
             Ab::Trace => {
                 // Copy a random opposing ability that can be copied.
-                let foes: Vec<Pos> = self.live_foes(p).collect();
-                let ok: Vec<Pos> = foes
-                    .into_iter()
+                let foes: crate::fixed::FixedVec<Pos, 2> = self.live_foes(p).collect();
+                let ok: crate::fixed::FixedVec<Pos, 2> = foes
+                    .iter()
+                    .copied()
                     .filter(|&q| {
-                        let a = dex().ability(self.m(q).ability);
+                        let a = self.dex.ability(self.m(q).ability);
                         !a.cantsuppress && !NO_TRACE.contains(&a.id.as_str())
                     })
                     .collect();
@@ -281,7 +306,7 @@ impl Battle {
                 }
             }
             Ab::Frisk => {
-                for q in self.live_foes(p).collect::<Vec<_>>() {
+                for &q in &self.live_foes(p).collect::<crate::fixed::FixedVec<_, 2>>() {
                     self.reveal_item(q);
                 }
                 self.reveal_ability(p);
@@ -289,8 +314,13 @@ impl Battle {
             Ab::SupremeOverlord => {
                 fallen = self.sides[p.s()].total_fainted.min(5);
             }
-            Ab::FairyAura | Ab::Pressure | Ab::Unnerve | Ab::MoldBreaker | Ab::AirLock | Ab::CloudNine => {
+            Ab::FairyAura | Ab::Pressure | Ab::Unnerve | Ab::MoldBreaker => {
                 self.reveal_ability(p);
+            }
+            // onStart: eachEvent('WeatherChange') (also on its End).
+            Ab::AirLock | Ab::CloudNine => {
+                self.reveal_ability(p);
+                self.each_event_draws();
             }
             Ab::CuriousMedicine => {
                 if let Some(a) = self.live_ally(p) {

@@ -124,6 +124,9 @@ impl Battle {
         let mut bt = Battle::new([&teams[0], &teams[1]], seed, cfg);
         bt.turn = i(v, "turn") as u16;
         let phase = s(v, "phase");
+        // Showdown's midTurn is set while a switch request interrupts a turn (and through
+        // end-of-turn replacements); a move request starts a fresh turn.
+        bt.mid_turn = phase == "switch";
         bt.phase = match phase {
             "teampreview" => return Ok(bt),
             "move" => Phase::Move,
@@ -242,8 +245,15 @@ impl Battle {
             for a in q {
                 let choice = s(a, "choice");
                 match choice {
-                    "residual" | "beforeTurn" => continue,
-                    "move" | "switch" | "megaEvo" => {}
+                    "residual" => {
+                        bt.queue.push(Battle::marker(ActionKind::Residual, 300));
+                        continue;
+                    }
+                    "beforeTurn" => {
+                        bt.queue.push(Battle::marker(ActionKind::BeforeTurn, 4));
+                        continue;
+                    }
+                    "move" | "switch" | "instaswitch" | "megaEvo" | "runSwitch" => {}
                     _ => return Err(format!("unsupported queued action {choice}")),
                 }
                 let p = pos_from_code(i(a, "pos"))?;
@@ -263,8 +273,15 @@ impl Battle {
                         frac: 0,
                         speed,
                         move_id: 0,
+                        loc: 0,
+                        orig: crate::battle::NO_ORIG,
                     },
-                    "megaEvo" => Action { kind: ActionKind::Mega, pos: p, mon, order: 104, priority: 0, frac: 0, speed, move_id: 0 },
+                    "megaEvo" => Action { kind: ActionKind::Mega, pos: p, mon, order: 104, priority: 0, frac: 0, speed, move_id: 0,
+                        loc: 0, orig: crate::battle::NO_ORIG },
+                    "instaswitch" => Action { kind: ActionKind::InstaSwitch { to: i(a, "target") as u8 }, pos: p, mon, order: 3, priority: 0,
+                        frac: 0, speed, move_id: 0, loc: 0, orig: crate::battle::NO_ORIG },
+                    "runSwitch" => Action { kind: ActionKind::RunSwitch, pos: p, mon, order: 101, priority: 0, frac: 0, speed, move_id: 0,
+                        loc: 0, orig: crate::battle::NO_ORIG },
                     _ => {
                         let mid_s = s(a, "move");
                         let m = &bt.sides[p.s()].mons[mon as usize];
@@ -278,7 +295,7 @@ impl Battle {
                         let loc = i(a, "target_loc");
                         let tgt = target_code(p, d.mv(mid).target, loc);
                         Action {
-                            kind: ActionKind::Move { mslot: mslot as u8, target: tgt },
+                            kind: ActionKind::Move { mslot: mslot as u8, target: tgt, recharge: mid_s == "recharge" },
                             pos: p,
                             mon,
                             order: 200,
@@ -286,6 +303,8 @@ impl Battle {
                             frac,
                             speed,
                             move_id: mid,
+                            loc: loc as i8,
+                            orig: a.get("orig").and_then(|x| x.as_u64()).map(|x| x as u8).unwrap_or(crate::battle::NO_ORIG),
                         }
                     }
                 };
@@ -316,6 +335,16 @@ impl Battle {
             m.alt_locked = s(mv, "base_species") == d.sp(m.alt_species).id;
             m.weight_hg = m.alt_weight_hg;
         }
+        // Showdown's cached speed and pending-switch BeforeSwitchOut flag.
+        m.speed = i(mv, "speed") as i32;
+        m.vol.skip_before_switch_out = b(mv, "skip_before_switch_out");
+        // Showdown's actual gender (unset genders were drawn when the battle started).
+        m.gender = match s(mv, "gender") {
+            "M" => 1,
+            "F" => 2,
+            "" => 0,
+            g => return Err(format!("unknown gender {g}")),
+        };
         let ab = s(mv, "ability");
         m.ability = d.ability_id(ab).ok_or(format!("unknown ability {ab}"))?;
         let bab = s(mv, "base_ability");
@@ -484,12 +513,14 @@ impl Battle {
                     // Without the move's own volatile the attack already
                     // happened this turn (twoturnmove lingers until residual).
                     if !vols.contains_key(mvid) {
+                        v.twoturn_spent = true;
                         continue;
                     }
                     v.charging = slot_of(mvid)? + 1;
                     let tl = vols.get(mvid).map(|x| i(x, "targetLoc")).unwrap_or(0);
                     let p = Pos::new(sidx, pos.max(0) as usize);
-                    v.charge_target = target_code(p, d.mv(d.move_id(mvid).unwrap()).target, tl) as i8;
+                    let _ = p;
+                    v.charge_target = tl as i8;
                 }
                 "fly" | "bounce" => v.semi_inv = SemiInv::Air,
                 "dig" => v.semi_inv = SemiInv::Underground,
@@ -519,7 +550,13 @@ impl Battle {
                 "ingrain" => v.ingrain = true,
                 "charge" => v.charge = true,
                 "stockpile" => v.stockpile = i(st, "layers") as u8,
-                "attract" => v.attract = true,
+                // No Retreat's own 'trapped' volatile (no_retreat covers it).
+                "trapped" if vols.contains_key("noretreat") => {}
+                "attract" => {
+                    v.attract = true;
+                    v.attract_src = i(st, "sourceSlot").clamp(0, 3) as u8;
+                    v.attract_mon = i(st, "sourceIdx").clamp(0, 5) as u8;
+                }
                 "noretreat" => v.no_retreat = true,
                 "laserfocus" => v.laser_focus = dur,
                 "tarshot" => v.tar_shot = true,
@@ -574,6 +611,10 @@ impl Battle {
                 }
                 let k = format!("{sid}.{idx}");
                 f.insert(format!("{k}.hp"), json!(m.hp));
+                // Showdown's cached speed of active Pokemon (exact parity only compares it).
+                if m.slot >= 0 && !m.fainted {
+                    f.insert(format!("{k}.spdc"), json!(m.speed));
+                }
                 let st = if m.fainted {
                     "fnt"
                 } else if m.status == Status::None {
@@ -808,7 +849,7 @@ impl Battle {
             if let Some(fx) = self.fixed_damage(src, tgt, &am) {
                 return Some(fx);
             }
-            self.calc_damage(src, tgt, &am, crit, roll)
+            self.calc_damage(src, tgt, &am, crit, Some(roll))
         })();
         self.mold_breaker = false;
         Ok(out)

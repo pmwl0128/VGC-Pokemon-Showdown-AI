@@ -6,9 +6,9 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const PS = process.env.PS_DIR || path.join(__dirname, 'ps');
+const { PS_DIR: PS } = require('./pinned');
 const { Teams, TeamValidator } = require(path.join(PS, 'dist', 'sim'));
-const FORMAT = process.env.FORMAT || 'gen9championsvgc2026regmc';
+const { FORMAT } = require('./pinned');
 const file = process.argv[2];
 let raw = fs.readFileSync(file);
 if (file.endsWith('.gz')) raw = zlib.gunzipSync(raw);
