@@ -594,6 +594,13 @@ impl Battle {
                     bp
                 }
             }
+            MoveFx::InfernalParade => {
+                if t.status != Status::None {
+                    bp * 2
+                } else {
+                    bp
+                }
+            }
             MoveFx::StoredPower | MoveFx::PowerTrip => {
                 let pos: u32 = s.boosts.iter().filter(|&&b| b > 0).map(|&b| b as u32).sum();
                 bp + 20 * pos
@@ -694,6 +701,7 @@ impl Battle {
                 }
             }
             Ab::IronFist if am.flags & flag::PUNCH != 0 => 4915,
+            Ab::Reckless if d.mv(am.id).recoil.0 > 0 || d.mv(am.id).crash_damage => 4915,
             Ab::ToughClaws if am.flags & flag::CONTACT != 0 => 5325,
             Ab::SheerForce if am.sheer_force || d.mv(am.id).has_sheer_force_boost => 5325,
             Ab::Analytic if !self.any_other_will_move(src) => 5325,
@@ -787,6 +795,12 @@ impl Battle {
         if matches!(self.it(src), It::ScopeLens | It::RazorClaw) {
             ratio += 1;
         }
+        if self.it(src) == It::Leek {
+            let base = self.m(src).base_species;
+            if Some(base) == self.dex.species_id("farfetchd") || Some(base) == self.dex.species_id("sirfetchd") {
+                ratio += 2;
+            }
+        }
         let crit = if will {
             true
         } else if ratio <= 0 {
@@ -861,6 +875,7 @@ impl Battle {
             let m = match self.it(src) {
                 It::ChoiceBand if physical => fm(3, 2),
                 It::ChoiceSpecs if !physical => fm(3, 2),
+                It::LightBall if Some(self.m(src).base_species) == d.species_id("pikachu") => fm(2, 1),
                 _ => NO_MOD,
             };
             let id = d.item(s.item);
@@ -878,6 +893,7 @@ impl Battle {
             // The target's onSourceModifyAtk / onSourceModifySpA.
             let m = match self.tab(tgt) {
                 Ab::ThickFat if matches!(am.ty, Type::Fire | Type::Ice) => fm(1, 2),
+                Ab::Heatproof if am.ty == Type::Fire => fm(1, 2),
                 Ab::WaterBubble if am.ty == Type::Fire => fm(1, 2),
                 _ => NO_MOD,
             };
@@ -1139,8 +1155,15 @@ impl Battle {
         }
         if mv.ohko {
             let (sl, tl) = (self.m(src).level as u32, self.m(tgt).level as u32);
-            if tl > sl {
+            // hitStepAccuracy: the level check and Sheer Cold's Ice-type immunity skip the
+            // draw entirely (Showdown logs -immune [ohko]).
+            if tl > sl || (mv.ohko_ice && self.m(tgt).has_type(Type::Ice)) {
                 return false;
+            }
+            // Gen 7+: a non-Ice user's Sheer Cold is 20% accurate, 30 otherwise.
+            let mut acc = 30;
+            if mv.ohko_ice && !self.m(src).has_type(Type::Ice) {
+                acc = 20;
             }
             acc += sl - tl;
             return self.rng.chance(acc.min(100), 100);
@@ -1174,7 +1197,9 @@ impl Battle {
         if self.tab(tgt) != Ab::Unaware {
             boost = self.m(src).boosts[B_ACC] as i32;
         }
-        if !mv.ignore_evasion && self.ab(src) != Ab::Unaware && !(self.ab(src) == Ab::Illuminate) {
+        if !mv.ignore_evasion && self.ab(src) != Ab::Unaware && !(self.ab(src) == Ab::Illuminate)
+            && self.ab(src) != Ab::KeenEye
+        {
             boost = (boost - self.m(tgt).boosts[B_EVA] as i32).clamp(-6, 6);
         }
         let boost = boost.clamp(-6, 6);

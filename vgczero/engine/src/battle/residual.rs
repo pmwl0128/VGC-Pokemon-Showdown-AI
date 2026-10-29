@@ -569,7 +569,11 @@ impl Battle {
                 self.damage(p, dmg, None, DmgKind::Indirect);
             }
             Res::Burn => {
-                self.damage(p, (mh / 16).max(1), None, DmgKind::Indirect);
+                let mut dmg = (mh / 16).max(1);
+                if self.ab(p) == Ab::Heatproof {
+                    dmg /= 2;
+                }
+                self.damage(p, dmg, None, DmgKind::Indirect);
             }
             Res::Curse => {
                 self.damage(p, (mh / 4).max(1), None, DmgKind::Indirect);

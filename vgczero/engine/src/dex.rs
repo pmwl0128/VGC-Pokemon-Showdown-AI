@@ -464,6 +464,8 @@ pub struct MoveData {
     pub ignore_immunity: bool,
     pub ignore_ability: bool,
     pub ohko: bool,
+    /// Sheer Cold only: Ice-type targets are immune (gen 7+); see accuracy_hits.
+    pub ohko_ice: bool,
     pub crash_damage: bool,
     pub mind_blown_recoil: bool,
     pub struggle_recoil: bool,
@@ -1185,6 +1187,7 @@ fn parse_move(mv: &Value) -> MoveData {
         ignore_immunity: mv.get("ignoreImmunity").map(|x| x.as_bool().unwrap_or(true)).unwrap_or(false),
         ignore_ability: b(mv, "ignoreAbility"),
         ohko: b(mv, "ohko"),
+        ohko_ice: matches!(mv.get("ohko"), Some(Value::String(x)) if x == "Ice"),
         crash_damage: b(mv, "hasCrashDamage"),
         mind_blown_recoil: b(mv, "mindBlownRecoil"),
         struggle_recoil: b(mv, "struggleRecoil"),

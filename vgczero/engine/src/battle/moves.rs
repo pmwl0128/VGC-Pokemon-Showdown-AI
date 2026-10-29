@@ -314,6 +314,9 @@ impl Battle {
             } else if mv.fx == MoveFx::KingsShield {
                 self.mm(p).set_alt_forme(false);
             }
+            // setSpecies resets the cached speed to the raw stat; Showdown resolves the forme
+            // change before updateSpeed, so the action speed (tailwind included) is back.
+            self.mm(p).speed = self.action_speed(p);
         }
         let mut am = self.make_active_move(p, move_id, mslot, struggle);
         self.resolve_move_type(p, &mut am);
@@ -1134,10 +1137,18 @@ impl Battle {
             blog!(self, "|-activate|{}|ability: Magic Bounce", self.name(t));
             let mut bounced = *am;
             bounced.flags &= !flag::REFLECTABLE;
+            // getActiveMove: the re-executed move comes from the bouncer, so the original
+            // user's Prankster (Dark immunity) does not carry over (pranksterBoosted = false).
+            bounced.prankster = false;
             // useMove(newMove, target, {target: source}): the reflected move goes through the
-            // whole hit pipeline (immunities, accuracy...) from the bouncer.
+            // whole hit pipeline (immunities, accuracy...) from the bouncer. Target selection
+            // reruns as well: Rage Powder / Follow Me of the bouncer's foes can redirect it.
             if self.is_live(p) {
-                self.try_spread_move_hit(t, &mut bounced, &[p]);
+                let mut tgt = p;
+                if matches!(bounced.target, Target::Normal | Target::Any | Target::AdjacentFoe | Target::RandomNormal | Target::Scripted) {
+                    tgt = self.redirect(t, &bounced, p);
+                }
+                self.try_spread_move_hit(t, &mut bounced, &[tgt]);
             }
             return Hit::NotFail;
         }
@@ -1197,6 +1208,10 @@ impl Battle {
             self.reveal_ability(t);
             return Hit::Failed;
         }
+        if am.flags & flag::BULLET != 0 && tab == Ab::Bulletproof && t != p {
+            self.reveal_ability(t);
+            return Hit::Failed;
+        }
         Hit::Pending
     }
 
@@ -1240,7 +1255,10 @@ impl Battle {
         let mut hits: u8 = 1;
         if mv.multihit.0 > 0 {
             let (lo, hi) = mv.multihit;
-            if lo == 2 && hi == 5 {
+            if self.ab(p) == Ab::SkillLink {
+                // Skill Link's onModifyMove replaces the 2-5 array with its maximum: no count draw.
+                hits = hi;
+            } else if lo == 2 && hi == 5 {
                 const DIST: [u8; 20] = [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5];
                 hits = DIST[self.rng.below(20) as usize];
             } else if lo == hi {
@@ -1286,7 +1304,7 @@ impl Battle {
             }
             am.hit = h;
             am.parental_bond_hit = parental && h == 2;
-            if mv.multiaccuracy && h > 1 {
+            if mv.multiaccuracy && h > 1 && self.ab(p) != Ab::SkillLink {
                 let t = targets[0];
                 if !self.accuracy_hits(p, t, am) {
                     break;
@@ -1568,6 +1586,7 @@ impl Battle {
             MoveFx::SuperFang => Some((tm.hp as u32 / 2).max(1)),
             MoveFx::FinalGambit => Some(s.hp as u32),
             MoveFx::Endeavor => Some((tm.hp as u32).saturating_sub(s.hp as u32)),
+            MoveFx::NightShade => Some(s.level as u32),
             MoveFx::Counter | MoveFx::MirrorCoat | MoveFx::MetalBurst => {
                 let v = s.vol;
                 let ok = match am.fx {
@@ -2043,10 +2062,10 @@ impl Battle {
             }
             MoveFx::Rest => {
                 let mh = self.m(p).max_hp as u32;
-                {
-                    let m = self.mm(p);
-                    m.status = Status::Slp;
-                    m.status_turns = 3;
+                // Through the status path: immunity, the champions [2, 3, 3] startTime draw
+                // (slp onStart) and the -status log; then Rest's full heal.
+                if !self.try_set_status(p, Status::Slp, Some(p)) {
+                    return false;
                 }
                 self.heal(p, mh);
                 self.check_status_berry(p);
@@ -2368,6 +2387,10 @@ impl Battle {
                     self.reveal_ability(t);
                     self.damage(p, (mh / 8).max(1), Some(t), DmgKind::Indirect);
                 }
+                Ab::Gooey if self.is_live(p) => {
+                    self.reveal_ability(t);
+                    self.boost(p, &ups(B_SPE, -1), BoostSrc::Ability(t));
+                }
                 Ab::FlameBody if self.rng.chance(3, 10) => {
                     self.try_set_status(p, Status::Brn, Some(t));
                 }
@@ -2419,9 +2442,7 @@ impl Battle {
                     blog!(self, "|-enditem|{}|Eject Button", self.name(t));
                     self.consume_item(t);
                     self.mm(t).vol.switch_flag = true;
-                    if self.is_live(p) {
-                        self.mm(p).vol.switch_flag = false;
-                    }
+                    // The attacker's own self-switch flag stays (Showdown asks both switches).
                 }
                 It::RedCard if self.is_live(p) && self.sides[p.s()].bench_available() > 0 => {
                     self.consume_item(t);

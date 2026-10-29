@@ -243,6 +243,21 @@ impl Battle {
         let mut fallen = 0;
         match ab {
             Ab::Intimidate => self.intimidate(p),
+            Ab::ScreenCleaner => {
+                let mut any = false;
+                for side in 0..2 {
+                    let c = &mut self.sides[side].conds;
+                    if c.reflect > 0 || c.light_screen > 0 || c.aurora_veil > 0 {
+                        any = true;
+                    }
+                    c.reflect = 0;
+                    c.light_screen = 0;
+                    c.aurora_veil = 0;
+                }
+                if any {
+                    self.reveal_ability(p);
+                }
+            }
             Ab::Drizzle => {
                 self.reveal_ability(p);
                 self.set_weather(Weather::Rain, p);

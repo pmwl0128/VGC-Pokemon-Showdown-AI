@@ -83,7 +83,7 @@ impl Battle {
                         b[B_DEF] = 0;
                     }
                 }
-                Ab::Illuminate => {
+                Ab::Illuminate | Ab::KeenEye => {
                     if b[B_ACC] < 0 {
                         b[B_ACC] = 0;
                     }
