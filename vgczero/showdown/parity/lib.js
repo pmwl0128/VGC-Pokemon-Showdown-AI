@@ -218,6 +218,7 @@ function exportMon(battle, side, p) {
 		position: side.active.indexOf(p),
 		volatiles: vols,
 		last_move: p.lastMove ? p.lastMove.id : '',
+		last_move_target_loc: p.lastMoveTargetLoc || 0,
 		move_this_turn: p.moveThisTurn || '',
 		move_last_turn_result: p.moveLastTurnResult === undefined ? null : p.moveLastTurnResult,
 		move_this_turn_result: p.moveThisTurnResult === undefined ? null : p.moveThisTurnResult,

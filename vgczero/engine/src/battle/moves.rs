@@ -108,6 +108,7 @@ impl Battle {
             let m = self.mm(p);
             m.vol.last_move = move_id;
             m.vol.last_move_slot = mslot as u8;
+            m.vol.last_move_loc = loc;
             if !struggle {
                 m.reveal.moves |= 1 << mslot;
             }
@@ -281,6 +282,7 @@ impl Battle {
             confusion_hit: false,
             parental_bond_hit: false,
             bypass_protect_quarter: false,
+            smart_target: false,
         };
         am.prankster = self.ab(p) == Ab::Prankster && mv.category == Category::Status;
         // Sheer Force (onModifyMove): moves with secondaries lose them (and
@@ -357,6 +359,10 @@ impl Battle {
         let field = matches!(am.target, Target::All | Target::FoeSide | Target::AllySide | Target::AllyTeam);
         let (targets, n) = if field { ([p; MAX_TARGETS], 0) } else { self.move_targets_resolved(p, am, target) };
         let _ = loc;
+        // getSmartTargets picked the target and its ally (Dragon Darts).
+        if n == 2 && mv.smart_target {
+            am.smart_target = true;
+        }
         // Pressure: one extra PP per opposing Pressure Pokemon targeted.
         // Showdown skips the DeductPP event when sourceEffect is set: a locked
         // (two-turn strike) execution does not charge Pressure's extra PP.
@@ -401,7 +407,7 @@ impl Battle {
             let hp = self.m(p).hp as u32;
             self.damage(p, hp, Some(p), DmgKind::SelfCost);
         }
-        if n > 1 {
+        if n > 1 && !mv.smart_target {
             am.spread_hit = true;
         }
         // onTry / PrepareHit (move-specific failure conditions).
@@ -539,8 +545,24 @@ impl Battle {
                     }
                 }
                 // RedirectTarget handlers only take targets valid for the move (validTarget).
+                let mut redirected = false;
                 if matches!(am.target, Target::Normal | Target::Any | Target::AdjacentFoe | Target::RandomNormal | Target::Scripted) {
-                    t = self.redirect(p, am, t);
+                    (t, redirected) = self.redirect(p, am, t);
+                }
+                // getSmartTargets (Dragon Darts): the target's live adjacent ally joins; a
+                // fainted target leaves only the ally; no usable ally drops smartTarget, and
+                // so does a redirect handler that fired (Follow Me & co. clear it).
+                if self.dex.mv(am.id).smart_target && !redirected {
+                    let t2 = Pos::new(t.s(), 1 - t.i());
+                    if t2 != p && self.is_live(t2) {
+                        if fainted(self, t) {
+                            out[0] = t2;
+                            return (out, 1);
+                        }
+                        out[0] = t;
+                        out[1] = t2;
+                        return (out, 2);
+                    }
                 }
                 if fainted(self, t) && am.flags & flag::FUTUREMOVE == 0 {
                     return (out, 0);
@@ -565,10 +587,11 @@ impl Battle {
     /// RedirectTarget (Showdown's priorityEvent, handlers sorted by priority
     /// then speed): Follow Me / Rage Powder of the user's foes (priority 1,
     /// also for moves aimed at the user's own ally), then Lightning Rod /
-    /// Storm Drain of any other Pokemon (priority 0).
-    fn redirect(&mut self, p: Pos, am: &ActiveMove, t: Pos) -> Pos {
+    /// Storm Drain of any other Pokemon (priority 0). Also returns whether a handler
+    /// fired (each of them then turns smartTarget off, target changed or not).
+    fn redirect(&mut self, p: Pos, am: &ActiveMove, t: Pos) -> (Pos, bool) {
         if matches!(self.ab(p), Ab::Stalwart) || self.dex.mv(am.id).tracks_target {
-            return t;
+            return (t, false);
         }
         let powder_immune = self.m(p).has_type(Type::Grass) || self.ab(p) == Ab::Overcoat;
         let mut best: Option<(i32, Pos)> = None;
@@ -590,12 +613,12 @@ impl Battle {
             }
         }
         if let Some((_, q)) = best {
-            return q;
+            return (q, true);
         }
         let absorber = match am.ty {
             Type::Electric => Ab::LightningRod,
             Type::Water => Ab::StormDrain,
-            _ => return t,
+            _ => return (t, false),
         };
         let mut best: Option<(i32, Pos)> = None;
         for c in 0..4 {
@@ -616,9 +639,9 @@ impl Battle {
             if q != t {
                 self.reveal_ability(q);
             }
-            return q;
+            return (q, true);
         }
-        t
+        (t, false)
     }
 
     /// Two-turn moves. Returns true if this was the charge turn.
@@ -1034,6 +1057,9 @@ impl Battle {
         }
         let live: crate::fixed::FixedVec<Pos, 4> = (0..n).filter(|&i| res[i] == Hit::Pending).map(|i| tg[i]).collect();
         let any_fail = (0..n).any(|i| res[i] == Hit::Failed);
+        if any_fail {
+            am.smart_target = false;
+        }
         if live.is_empty() {
             // Protect-style blocks (NotFail) still count as "did nothing".
             let _ = any_fail;
@@ -1088,7 +1114,12 @@ impl Battle {
                 } else if am.flags & flag::CONTACT != 0 && matches!(self.ab(p), Ab::UnseenFist | Ab::PiercingDrill) {
                     am.bypass_protect_quarter = true;
                 } else {
-                    blog!(self, "|-activate|{}|move: Protect", self.name(t));
+                    // A blocked Dragon Darts hit turns smartTarget off instead of the message.
+                    if am.smart_target {
+                        am.smart_target = false;
+                    } else {
+                        blog!(self, "|-activate|{}|move: Protect", self.name(t));
+                    }
                     if am.flags & flag::CONTACT != 0 && self.makes_contact(p, am) {
                         match prot {
                             ProtectKind::SpikyShield => {
@@ -1135,7 +1166,7 @@ impl Battle {
             if self.is_live(p) {
                 let mut tgt = p;
                 if matches!(bounced.target, Target::Normal | Target::Any | Target::AdjacentFoe | Target::RandomNormal | Target::Scripted) {
-                    tgt = self.redirect(t, &bounced, p);
+                    tgt = self.redirect(t, &bounced, p).0;
                 }
                 self.try_spread_move_hit(t, &mut bounced, &[tgt]);
             }
@@ -1288,6 +1319,11 @@ impl Battle {
         let mut hit_no = 0u8;
         let mut self_dropped = false;
         let mut status_hit = false;
+        // Dragon Darts with both targets left: hit 1 goes to the first, hit 2 to the second;
+        // its moveDamage accumulates over the hits, so hit 2 only ends the loop when hit 1
+        // failed too.
+        let smart = am.smart_target && n == 2;
+        let mut smart_all_failed = true;
         // No check that the user is standing: Explosion's user is at 0 HP from the start
         // (a single-target hit loop stops after a hit that leaves the user at 0 HP).
         for h in 1..=hits {
@@ -1307,7 +1343,17 @@ impl Battle {
             }
             hit_no = h;
             // spreadMoveHit for this hit.
-            let (dmg, subbed, status_ok) = self.spread_move_hit(p, am, targets, &mut self_dropped);
+            let (dmg, subbed, status_ok) = if smart {
+                let i = h as usize - 1;
+                let (d1, s1, o1) = self.spread_move_hit(p, am, &targets[i..i + 1], &mut self_dropped);
+                let (mut dmg, mut subbed, mut status_ok) = ([None; MAX_TARGETS], [false; MAX_TARGETS], [false; MAX_TARGETS]);
+                dmg[i] = d1[0];
+                subbed[i] = s1[0];
+                status_ok[i] = o1[0];
+                (dmg, subbed, status_ok)
+            } else {
+                self.spread_move_hit(p, am, targets, &mut self_dropped)
+            };
             // selfdestruct 'ifHit' (Memento; Final Gambit and Healing Wish pay in their own
             // effects): the user faints once the move reaches a target.
             if mv.selfdestruct == 2 && !matches!(am.fx, MoveFx::FinalGambit | MoveFx::HealingWish) && self.is_live(p) {
@@ -1315,7 +1361,9 @@ impl Battle {
                 self.damage(p, hp, Some(p), DmgKind::SelfCost);
             }
             // hitStepMoveHitLoop: a hit that failed on every target ends the loop (no Update).
-            if (0..n).all(|i| dmg[i].is_none() && !status_ok[i]) {
+            let this_failed = (0..n).all(|i| dmg[i].is_none() && !status_ok[i]);
+            smart_all_failed = smart_all_failed && this_failed;
+            if if smart { smart_all_failed } else { this_failed } {
                 break;
             }
             if (0..n).any(|i| status_ok[i]) {
@@ -1349,7 +1397,8 @@ impl Battle {
         // faintMessages(false, false, !pokemon.hp): Pokemon at 0 HP faint now
         // (so a later boost sees the foe side's Pokemon left).
         self.faint_pending(!self.is_live(p));
-        if hits > 1 && hit_no > 0 {
+        // (typeof move.smartTarget !== 'boolean': never for Dragon Darts.)
+        if hits > 1 && hit_no > 0 && !mv.smart_target {
             blog!(self, "|-hitcount|{}|{}", self.name(targets[0]), hit_no);
         }
         // Recoil from total damage.
@@ -1368,7 +1417,7 @@ impl Battle {
             let t = targets[i];
             if damaged[i] && t != p && self.is_live(t) {
                 let m = self.mm(t);
-                m.vol.times_attacked = m.vol.times_attacked.saturating_add(hit_no);
+                m.vol.times_attacked = m.vol.times_attacked.saturating_add(if am.smart_target { 1 } else { hit_no });
             }
         }
         // After-move-secondary: Eject Button, Red Card, Emergency Exit.
@@ -1844,6 +1893,27 @@ impl Battle {
                     self.mm(t).vol.disable = 0;
                     self.consume_item(t);
                 }
+                return true;
+            }
+            MoveFx::Instruct => {
+                // (Beak Blast / Focus Punch / Shell Trap volatiles: those moves are not in the
+                // supported pool. A last move outside the move slots is only a called move,
+                // and every calling move has failinstruct.)
+                if !self.is_live(t) || t == p {
+                    return false;
+                }
+                let last = self.m(t).vol.last_move;
+                if last == 0 {
+                    return false;
+                }
+                let Some(slot) = self.m(t).move_slot(last) else { return false };
+                let lm = self.dex.mv(last);
+                if lm.flags & (flag::FAILINSTRUCT | flag::CHARGE | flag::RECHARGE) != 0 || self.m(t).pp[slot] == 0 {
+                    return false;
+                }
+                blog!(self, "|-singleturn|{}|move: Instruct|[of] {}", self.name(t), self.name(p));
+                let loc = self.m(t).vol.last_move_loc;
+                self.instruct_action(t, slot, last, loc);
                 return true;
             }
             MoveFx::Taunt => return self.add_volatile(t, VolKind::Taunt, Some(p)),

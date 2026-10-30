@@ -864,6 +864,50 @@ impl Battle {
         self.insert_choice(a);
     }
 
+    /// Instruct: queue the target's last move again, as Showdown's
+    /// prioritizeAction(resolveAction({choice: 'move', pokemon: target, moveid, targetLoc:
+    /// lastMoveTargetLoc})). resolveAction rolls FractionalPriority, keeps a non-zero
+    /// targetLoc as it is (only 0 draws a random target) and runs getActionSpeed.
+    pub(crate) fn instruct_action(&mut self, t: Pos, mslot: usize, move_id: u16, last_loc: i8) {
+        if self.queue.len >= MAX_QUEUE {
+            return;
+        }
+        // (prioritizeAction does not updateSpeed, unlike insertChoice: the cached speed stays.)
+        let mon = self.sides[t.s()].active[t.i()];
+        let d = self.dex;
+        let mut a = Action {
+            kind: ActionKind::Move { mslot: mslot as u8, target: TARGET_RANDOM, recharge: false },
+            pos: t,
+            mon,
+            order: 200,
+            priority: self.modify_priority(t, move_id, d.mv(move_id).priority),
+            frac: 0,
+            speed: 0,
+            move_id,
+            loc: 0,
+            orig: NO_ORIG,
+        };
+        if self.m(t).item != 0 && d.it(self.m(t).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
+            a.frac = 1;
+            blog!(self, "|-activate|{}|item: Quick Claw", self.name(t));
+        }
+        let mut loc = last_loc;
+        if loc == 0 {
+            let tt = self.action_target_type(t, move_id);
+            if let Some(q) = self.get_random_target(t, tt) {
+                loc = Self::loc_of(t, q);
+            }
+        }
+        a.loc = loc;
+        a.orig = self.orig_code(Self::at_loc(t, loc));
+        // getActionSpeed (end of resolveAction) calls getTarget for ModifyPriority.
+        let _ = self.get_target(t, move_id, loc, NO_ORIG);
+        a.speed = self.action_speed(t);
+        self.queue.push(a);
+        let i = self.queue.len - 1;
+        self.prioritize_action(i);
+    }
+
     /// Showdown's queue.insertChoice for one resolved action: before the first queued action
     /// it sorts strictly ahead of; among equal-key actions at a random position.
     pub(crate) fn insert_choice(&mut self, a: Action) {

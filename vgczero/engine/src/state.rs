@@ -121,6 +121,8 @@ pub struct Vol {
     pub move_actions: u16,
     pub last_move: MoveId,
     pub last_move_slot: u8,
+    /// Showdown's lastMoveTargetLoc (Instruct repeats the move at this location).
+    pub last_move_loc: i8,
     /// moveLastTurnResult === false (Stomping Tantrum, Temper Flare).
     pub last_move_failed: bool,
     pub this_move_failed: bool,

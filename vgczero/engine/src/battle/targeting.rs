@@ -136,6 +136,16 @@ impl Battle {
                 return Some(q);
             }
         }
+        // Dragon Darts (smartTarget): a fainted chosen target is replaced at random, never
+        // by its ally, and the self-location check below does not apply.
+        if mv.smart_target {
+            if let Some(q) = Self::at_loc(p, loc) {
+                if self.slot_mon(q).map(|m| !m.fainted).unwrap_or(false) {
+                    return Some(q);
+                }
+            }
+            return self.get_random_target(p, target);
+        }
         let self_loc = Self::loc_of(p, p);
         if matches!(target, Target::AdjacentAlly | Target::Any | Target::Normal) && loc == self_loc && self.m(p).vol.charging == 0 {
             return if mv.has(flag::FUTUREMOVE) { Some(p) } else { None };

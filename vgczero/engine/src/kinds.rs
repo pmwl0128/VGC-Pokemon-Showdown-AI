@@ -447,6 +447,8 @@ tag_enum!(MoveFx {
     Minimize = "minimize",
     Stockpile = "stockpile",
     SnipeShot = "snipeshot",
+    DragonDarts = "dragondarts",
+    Instruct = "instruct",
 });
 
 /// Moves whose Showdown callbacks are fully reproduced by the engine's generic

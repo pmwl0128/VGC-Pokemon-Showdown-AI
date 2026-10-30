@@ -421,6 +421,7 @@ impl Battle {
         let lm = s(mv, "last_move");
         v.last_move = if lm.is_empty() { 0 } else { d.move_id(lm).ok_or(format!("unknown move {lm}"))? };
         v.last_move_slot = m.moves[..m.n_moves as usize].iter().position(|&x| x == v.last_move && x != 0).unwrap_or(0) as u8;
+        v.last_move_loc = i(mv, "last_move_target_loc") as i8;
         v.last_move_failed = get(mv, "move_last_turn_result") == &Value::Bool(false);
         v.this_move_failed = get(mv, "move_this_turn_result") == &Value::Bool(false);
         v.moved_this_turn = !s(mv, "move_this_turn").is_empty();

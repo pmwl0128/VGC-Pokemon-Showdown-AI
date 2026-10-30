@@ -211,6 +211,9 @@ pub struct ActiveMove {
     pub parental_bond_hit: bool,
     /// Bypassed protection (Unseen Fist / Piercing Drill): damage x0.25.
     pub bypass_protect_quarter: bool,
+    /// Showdown's move.smartTarget while true: getSmartTargets picked both foes (Dragon
+    /// Darts); a hit step failing on one of them turns it off.
+    pub smart_target: bool,
 }
 
 impl Battle {
