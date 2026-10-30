@@ -673,6 +673,10 @@ impl Battle {
             return false;
         }
         match self.dex.it(m.item) {
+            // Mental Herb clears attract / taunt / encore / torment / disable / healblock.
+            It::MentalHerb => {
+                m.vol.taunt > 0 || m.vol.encore > 0 || m.vol.disable > 0 || m.vol.heal_block > 0 || m.vol.torment || m.vol.attract
+            }
             It::SitrusBerry | It::OranBerry => (m.hp as u32) * 2 <= m.max_hp as u32,
             It::LumBerry | It::ChestoBerry | It::CheriBerry | It::PechaBerry | It::RawstBerry | It::AspearBerry | It::PersimBerry => {
                 m.status != Status::None || m.vol.confusion > 0
@@ -697,6 +701,22 @@ impl Battle {
             return;
         }
         self.check_hp_berry(p);
+        // Mental Herb (onUpdate): if any of the six conditions is present, all six are
+        // removed and the item is consumed.
+        if self.it(p) == It::MentalHerb {
+            let v = self.m(p).vol;
+            if v.attract || v.taunt > 0 || v.encore > 0 || v.disable > 0 || v.heal_block > 0 || v.torment {
+                blog!(self, "|-enditem|{}|Mental Herb", self.name(p));
+                let m = self.mm(p);
+                m.vol.attract = false;
+                m.vol.taunt = 0;
+                m.vol.encore = 0;
+                m.vol.disable = 0;
+                m.vol.heal_block = 0;
+                m.vol.torment = false;
+                self.consume_item(p);
+            }
+        }
         // A consumed HP berry may be replaced by Symbiosis, so inspect the current
         // state after that handler rather than caching the held item across it.
         if self.m(p).status != Status::None || self.m(p).vol.confusion > 0 {

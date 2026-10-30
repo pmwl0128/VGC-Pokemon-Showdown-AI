@@ -155,7 +155,7 @@ function main() {
 		const kind = (byKind[sc.kind] = byKind[sc.kind] || { n: 0, exact: 0 });
 		if (!e || e.err) {
 			counts.skipped++;
-			if (process.env.EXACT_ERR) console.log(`  [${sc.id}] engine error: ${e ? e.err : "no result"}`, process.env.EXACT_ERR === "state" ? JSON.stringify(sc.state.sides.map(s => s.active.map(i => [s.mons[i].species, s.mons[i].volatiles, s.mons[i].last_move]))) : "");
+			if (process.env.EXACT_ERR) console.log(`  [${sc.id}] engine error: ${e ? e.err : "no result"}`, process.env.EXACT_ERR === "state" ? JSON.stringify(sc.state.sides.map(s => s.active.map(i => [s.mons[i].species, s.mons[i].volatiles, s.mons[i].last_move, s.mons[i].hp, s.mons[i].fainted, s.mons[i].item, (s.mons[i].moves || []).map(m => [m.id, m.pp])]))) + " choices=" + JSON.stringify(sc.engineChoices) + " sdchoices=" + JSON.stringify(sc.choices) : "");
 			continue;
 		}
 		kind.n++;

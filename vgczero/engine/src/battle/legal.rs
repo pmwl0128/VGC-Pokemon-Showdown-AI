@@ -125,8 +125,12 @@ impl Battle {
     /// Target choices (encoded 0/1/2) offered for a move.
     pub fn move_targets(&self, p: Pos, mid: MoveId) -> impl Iterator<Item = u8> {
         let mv = self.dex.mv(mid);
+        // Champions: a non-Ghost Curse targets the user (onModifyMove switches the target
+        // to 'self'); get_target / resolve_target resolve it the same way, so the offered
+        // targets must too.
+        let target = self.action_target_type(p, mid);
         let mut out = [false; 3];
-        match mv.target {
+        match target {
             Target::Normal | Target::Any | Target::AdjacentFoe => {
                 let f0 = self.is_live(p.foe(0));
                 let f1 = self.is_live(p.foe(1));
@@ -135,7 +139,7 @@ impl Battle {
                 if !f0 && !f1 {
                     out[T_FOE0 as usize] = true;
                 }
-                let ally_ok = mv.target != Target::AdjacentFoe
+                let ally_ok = target != Target::AdjacentFoe
                     && self.is_live(p.ally())
                     && (mv.category == Category::Status || self.cfg.ally_damage_targeting || ally_target_move(mv.fx));
                 out[T_ALLY as usize] = ally_ok;

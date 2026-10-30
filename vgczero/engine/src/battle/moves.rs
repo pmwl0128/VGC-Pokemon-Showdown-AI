@@ -359,7 +359,11 @@ impl Battle {
         let (targets, n) = if field { ([p; MAX_TARGETS], 0) } else { self.move_targets_resolved(p, am, target) };
         let _ = loc;
         // Pressure: one extra PP per opposing Pressure Pokemon targeted.
-        self.pressure_pp(p, am, &targets[..n]);
+        // Showdown skips the DeductPP event when sourceEffect is set: a locked
+        // (two-turn strike) execution does not charge Pressure's extra PP.
+        if self.m(p).vol.charging == 0 {
+            self.pressure_pp(p, am, &targets[..n]);
+        }
         // TryMove: Dazzling / Queenly Majesty / Armor Tail (onFoeTryMove).
         if self.blocked_by_dazzling(p, am, if n > 0 { Some(targets[n - 1]) } else { None }) {
             return false;
@@ -743,9 +747,9 @@ impl Battle {
     /// Protect-family stall check: fails if last to act or the stall roll fails.
     fn stall_check(&mut self, p: Pos) -> bool {
         // queue.willAct(): anyone still to act this turn.
+        // Showdown: the willAct() short-circuit fails the move without running the
+        // StallMove event, so the stall volatile stays (its duration keeps ticking).
         if !self.queue.will_act() {
-            self.mm(p).vol.stall_counter = 0;
-            self.mm(p).vol.stall_dur = 0;
             return false;
         }
         let m = self.m(p);
@@ -1028,21 +1032,6 @@ impl Battle {
                 }
             }
         }
-        // Substitute's onTryPrimaryHit (in the hit, after accuracy) blocks status moves.
-        for i in 0..n {
-            let t = tg[i];
-            if res[i] == Hit::Pending
-                && t != p
-                && self.m(t).vol.substitute > 0
-                && am.category == Category::Status
-                && am.flags & flag::BYPASSSUB == 0
-                && !am.infiltrates
-                && am.flags & flag::SOUND == 0
-            {
-                blog!(self, "|-fail|{}", self.name(p));
-                res[i] = Hit::Failed;
-            }
-        }
         let live: crate::fixed::FixedVec<Pos, 4> = (0..n).filter(|&i| res[i] == Hit::Pending).map(|i| tg[i]).collect();
         let any_fail = (0..n).any(|i| res[i] == Hit::Failed);
         if live.is_empty() {
@@ -1210,6 +1199,12 @@ impl Battle {
         }
         if am.flags & flag::BULLET != 0 && tab == Ab::Bulletproof && t != p {
             self.reveal_ability(t);
+            return Hit::Failed;
+        }
+        // Oblivious (onTryHit): Attract / Captivate / Taunt fail on it.
+        if t != p && tab == Ab::Oblivious && matches!(am.fx, MoveFx::Taunt) {
+            self.reveal_ability(t);
+            blog!(self, "|-immune|{}|[from] ability: Oblivious", self.name(t));
             return Hit::Failed;
         }
         Hit::Pending
@@ -1502,6 +1497,15 @@ impl Battle {
         for i in 0..n {
             let t = targets[i];
             if am.category == Category::Status || (am.fx == MoveFx::PollenPuff && t.side == p.side) {
+                // A status move that reaches a Substitute still "connects" (Showdown's
+                // moveDamage stays true), so the hit loop and the post-loop Update both run;
+                // the effect on the Pokemon behind it is blocked.
+                if am.category == Category::Status && behind_sub(self, t) {
+                    blog!(self, "|-fail|{}", self.name(p));
+                    out[i] = Some(0);
+                    sub_hit[i] = true;
+                    continue;
+                }
                 if self.is_live(t) || t == p {
                     status_ok[i] = self.status_move_effects(p, t, am);
                 }
@@ -1702,11 +1706,14 @@ impl Battle {
                     self.remove_item(t);
                 }
             }
-            MoveFx::StoneAxe if self.is_live(p) && !am.sheer_force => {
-                self.sides[t.s()].conds.stealth_rock = true;
+            // Showdown: onAfterHit places the hazard on source.side.foeSidesWithConditions()
+            // (the user's opposite side), not the target's side. onAfterSubDamage keeps the
+            // source.hp check for substitute hits.
+            MoveFx::StoneAxe if !am.sheer_force && (!sub_hit || self.is_live(p)) => {
+                self.sides[1 - p.s()].conds.stealth_rock = true;
             }
-            MoveFx::CeaselessEdge if self.is_live(p) && !am.sheer_force => {
-                let c = &mut self.sides[t.s()].conds;
+            MoveFx::CeaselessEdge if !am.sheer_force && (!sub_hit || self.is_live(p)) => {
+                let c = &mut self.sides[1 - p.s()].conds;
                 if c.spikes < 3 {
                     c.spikes += 1;
                 }

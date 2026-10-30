@@ -1125,20 +1125,41 @@ impl Battle {
     /// Accuracy check for one target. Returns true if the move hits.
     pub fn accuracy_hits(&mut self, src: Pos, tgt: Pos, am: &ActiveMove) -> bool {
         let mv = self.dex.mv(am.id);
-        if am.accuracy == 0 {
-            return true;
+        // Sheer Cold's level check and Ice-type immunity skip the whole step
+        // (Showdown logs -immune [ohko] before the Accuracy event).
+        if mv.ohko {
+            let (sl, tl) = (self.m(src).level as u32, self.m(tgt).level as u32);
+            if tl > sl || (mv.ohko_ice && self.m(tgt).has_type(Type::Ice)) {
+                return false;
+            }
         }
         if mv.target == Target::User && am.category == Category::Status && self.m(tgt).vol.semi_inv == SemiInv::None {
             return true;
         }
+        // Toxic from a Poison-type user: accuracy = true, and hitStepAccuracy's
+        // alwaysHit branch skips the Accuracy event.
+        if mv.status == crate::dex::Status::Tox && am.category == Category::Status && self.m(src).has_type(Type::Poison) {
+            return true;
+        }
+        // runEvent('Accuracy'): No Guard's onAnyAccuracy handlers in cached-speed order.
+        // Equal speeds shuffle; this event has no other handlers in the pool.
+        let mut ng = [(0i32, 0u8); 4];
+        let mut nn = 0;
+        for c in 0..4u8 {
+            let q = Pos::from_code(c);
+            if self.active_unfainted(q) && self.tab(q) == Ab::NoGuard {
+                ng[nn] = (self.m(q).speed, c);
+                nn += 1;
+            }
+        }
+        crate::rng::speed_sort(&mut self.rng, &mut ng[..nn], |a, b| b.0.cmp(&a.0));
         if self.ab(src) == Ab::NoGuard || self.tab(tgt) == Ab::NoGuard {
             return true;
         }
-        if self.m(tgt).vol.glaive_rush > 0 {
+        if am.accuracy == 0 {
             return true;
         }
-        // Toxic from a Poison-type user never misses.
-        if mv.status == crate::dex::Status::Tox && am.category == Category::Status && self.m(src).has_type(Type::Poison) {
+        if self.m(tgt).vol.glaive_rush > 0 {
             return true;
         }
         let mut acc = am.accuracy as u32;
@@ -1154,13 +1175,9 @@ impl Battle {
             _ => {}
         }
         if mv.ohko {
-            let (sl, tl) = (self.m(src).level as u32, self.m(tgt).level as u32);
-            // hitStepAccuracy: the level check and Sheer Cold's Ice-type immunity skip the
-            // draw entirely (Showdown logs -immune [ohko]).
-            if tl > sl || (mv.ohko_ice && self.m(tgt).has_type(Type::Ice)) {
-                return false;
-            }
+            // (The level check / Ice immunity already returned above.)
             // Gen 7+: a non-Ice user's Sheer Cold is 20% accurate, 30 otherwise.
+            let (sl, tl) = (self.m(src).level as u32, self.m(tgt).level as u32);
             let mut acc = 30;
             if mv.ohko_ice && !self.m(src).has_type(Type::Ice) {
                 acc = 20;
