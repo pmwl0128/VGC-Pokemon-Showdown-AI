@@ -74,6 +74,8 @@ pub struct Vol {
     pub must_recharge: bool,
     /// Minimize's volatile: minimize-flagged moves always hit it for double damage.
     pub minimize: bool,
+    /// Showdown's abilityState.busted: a hit was blocked while the forme was intact.
+    pub disguise_busted: bool,
     pub crit_stage: u8,
     /// Choice item lock: move slot + 1.
     pub choice_lock: u8,
@@ -202,6 +204,8 @@ pub struct Mon {
     pub alt_species: SpeciesId,
     pub alt_stats: [u16; 6],
     pub alt_weight_hg: u32,
+    /// The battle-only forme's types (Showdown's setSpecies assigns them).
+    pub alt_types: [Type; 2],
     pub alt_locked: bool,
     /// The set's own stats and weight (to revert a battle-only forme).
     pub home_stats: [u16; 6],
@@ -269,6 +273,7 @@ impl Mon {
             alt_species: set.alt.map(|a| a.species).unwrap_or(0),
             alt_stats: set.alt.map(|a| a.stats).unwrap_or_default(),
             alt_weight_hg: set.alt.map(|a| a.weight_hg).unwrap_or(0),
+            alt_types: set.alt.map(|a| a.types).unwrap_or_default(),
             alt_locked: false,
             home_stats: set.stats,
             home_weight_hg: set.weight_hg,
@@ -308,17 +313,22 @@ impl Mon {
         }
         if alt {
             self.species = self.alt_species;
+            self.types = self.alt_types;
             for k in 1..6 {
                 self.stats[k] = self.alt_stats[k];
             }
             self.weight_hg = self.alt_weight_hg;
         } else {
             self.species = self.base_species;
+            self.types = self.base_types;
             for k in 1..6 {
                 self.stats[k] = self.home_stats[k];
             }
             self.weight_hg = self.home_weight_hg;
         }
+        // setSpecies assigns the forme's own types (a Soak'd Mimikyu reverts to
+        // Ghost/Fairy), so a move-driven type change no longer applies.
+        self.vol.type_changed = false;
         // setSpecies resets the cached speed to the new raw Speed stat.
         self.speed = self.stats[5] as i32;
     }

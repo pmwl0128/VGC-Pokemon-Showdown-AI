@@ -20,6 +20,7 @@ pub struct MegaSpec {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct AltForme {
     pub species: SpeciesId,
+    pub types: [Type; 2],
     pub stats: [u16; 6],
     pub weight_hg: u32,
 }
@@ -137,6 +138,8 @@ pub fn parse_set(m: &Value, why: &mut Vec<String>) -> SetSpec {
     let alt_id = match sid {
         "aegislash" => Some("aegislashblade"),
         "palafin" => Some("palafinhero"),
+        // Disguise busts into a forme with the same stats; the change is permanent.
+        "mimikyu" => Some("mimikyubusted"),
         _ => None,
     };
     let alt = alt_id.and_then(|id| d.species_id(id)).map(|asp| {
@@ -153,7 +156,7 @@ pub fn parse_set(m: &Value, why: &mut Vec<String>) -> SetSpec {
             }
             st[k] = v as u16;
         }
-        AltForme { species: asp, stats: st, weight_hg: d.sp(asp).weight_hg }
+        AltForme { species: asp, types: d.sp(asp).types, stats: st, weight_hg: d.sp(asp).weight_hg }
     });
     SetSpec {
         alt,

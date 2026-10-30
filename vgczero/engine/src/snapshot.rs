@@ -454,6 +454,10 @@ impl Battle {
             v.fallen = f as u8;
         }
         v.protean = b(get(mv, "ability_state"), "protean") || b(get(mv, "ability_state"), "libero");
+        // Disguise: busted by a blocked hit; the forme change already took place when the
+        // species is the battle-only one.
+        v.disguise_busted = b(get(mv, "ability_state"), "busted")
+            || (m.alt_species != 0 && m.species == m.alt_species);
         // Counter / Mirror Coat / Metal Burst: the last damage taken this turn.
         if let Some(ab) = mv.get("attacked_by").and_then(|x| x.as_array()) {
             for a in ab.iter().rev() {
@@ -847,7 +851,17 @@ impl Battle {
             if am.fx == crate::kinds::MoveFx::Endeavor && self.m(src).hp >= self.m(tgt).hp {
                 return None;
             }
-            let crit = crit && !matches!(self.tab(tgt), Ab::BattleArmor | Ab::ShellArmor);
+            // Showdown's getDamage: a willCrit still runs the CriticalHit event, which an
+            // intact Mimikyu's Disguise answers with false.
+            let crit = crit
+                && !matches!(self.tab(tgt), Ab::BattleArmor | Ab::ShellArmor)
+                && !(self.tab(tgt) == Ab::Disguise
+                    && self.disguise_intact(tgt)
+                    && !(self.m(tgt).vol.substitute > 0
+                        && tgt != src
+                        && am.flags & crate::dex::flag::SOUND == 0
+                        && !am.infiltrates
+                        && am.flags & crate::dex::flag::BYPASSSUB == 0));
             if let Some(fx) = self.fixed_damage(src, tgt, &am) {
                 return Some(fx);
             }

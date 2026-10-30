@@ -608,6 +608,15 @@ impl Battle {
             return 0;
         }
         let mut dmg = amount.min(self.m(tgt).hp as u32);
+        // Disguise (onDamage priority 1): a move's hit on an intact Mimikyu is nullified
+        // and busts the disguise; the Update event then changes the forme and pays
+        // baseMaxhp / 8. The -damage line still follows with unchanged HP, and the
+        // Pokemon does not count as hurt this turn.
+        if kind == DmgKind::Attack && self.tab(tgt) == Ab::Disguise && self.disguise_intact(tgt) {
+            self.mm(tgt).vol.disguise_busted = true;
+            blog!(self, "|-activate|{}|ability: Disguise", self.name(tgt));
+            dmg = 0;
+        }
         if kind == DmgKind::Attack {
             let m = self.m(tgt);
             let full = m.hp == m.max_hp;
@@ -628,7 +637,7 @@ impl Battle {
         }
         let m = self.mm(tgt);
         m.hp -= dmg as u16;
-        if kind == DmgKind::Attack {
+        if kind == DmgKind::Attack && dmg > 0 {
             m.vol.hurt_this_turn = true;
         }
         let hp = m.hp;
@@ -684,10 +693,18 @@ impl Battle {
     }
 
     /// update_items(p) may change something: a superset of its conditions (attract, a
-    /// healing berry at half HP or less, a status berry with a status or confusion). Must be
-    /// widened whenever update_items gains a check.
+    /// healing berry at half HP or less, a status berry with a status or confusion, the
+    /// Disguise forme change). Must be widened whenever update_items gains a check.
     pub(crate) fn update_can_act(&self, m: &crate::state::Mon) -> bool {
         if m.vol.attract {
+            return true;
+        }
+        if self.dex.ab(m.ability) == Ab::Disguise
+            && m.vol.disguise_busted
+            && m.alt_species != 0
+            && m.species != m.alt_species
+            && self.dex.species_id("mimikyu") == Some(m.base_species)
+        {
             return true;
         }
         if m.item == 0 {
@@ -717,6 +734,18 @@ impl Battle {
             if i != v.attract_mon || self.sides[s.s()].mons[i as usize].fainted {
                 self.mm(p).vol.attract = false;
             }
+        }
+        // Disguise's onUpdate (an ability: after conditions, before the item): the busted
+        // disguise changes the forme for good and pays baseMaxhp / 8. Unlike the attacking
+        // events, the Update event runs a suppressed ability's handler as well.
+        if self.ab(p) == Ab::Disguise && self.disguise_bust_pending(p) {
+            let alt = self.dex.sp(self.m(p).alt_species);
+            let name = alt.name.clone();
+            blog!(self, "|-formechange|{}|{}|[from] ability: Disguise", self.name(p), name);
+            self.mm(p).set_alt_forme(true);
+            self.mm(p).alt_locked = true;
+            let eighth = (self.m(p).max_hp / 8) as u32;
+            self.damage(p, eighth, Some(p), DmgKind::Indirect);
         }
         if self.m(p).item == 0 {
             return;

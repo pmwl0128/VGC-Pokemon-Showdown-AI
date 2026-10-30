@@ -409,6 +409,18 @@ impl Battle {
     /// Showdown's runEffectiveness (log2 sum over the target's types).
     pub fn effectiveness(&self, ty: Type, tgt: Pos, am: Option<&ActiveMove>) -> i32 {
         let chart = &self.dex.chart;
+        // Disguise's onEffectiveness: a damaging move against an intact Mimikyu is neutral
+        // whatever its type (an immune move never reaches the damage step; a Substitute in
+        // front of the Mimikyu uses the chart as usual).
+        if let Some(am) = am {
+            if am.category != Category::Status
+                && self.tab(tgt) == Ab::Disguise
+                && self.disguise_intact(tgt)
+                && !(self.m(tgt).vol.substitute > 0 && am.flags & flag::SOUND == 0 && !am.infiltrates && am.flags & flag::BYPASSSUB == 0)
+            {
+                return 0;
+            }
+        }
         // Iron Ball's onEffectiveness: a Ground move against a Flying type is
         // neutral for each of its types (not grounded by other means).
         if ty == Type::Ground && self.it(tgt) == It::IronBall && self.types_of(tgt).contains(&Type::Flying) {
@@ -784,6 +796,28 @@ impl Battle {
 
     // ---- damage ----------------------------------------------------------------
 
+    /// Disguise is still intact: the holder is a Mimikyu in its base forme that has not
+    /// blocked a hit yet. Showdown's handlers test `target.species.id`, so a Disguise
+    /// forced onto another species (the damage fixtures do that) does nothing.
+    #[inline]
+    pub(crate) fn disguise_intact(&self, p: Pos) -> bool {
+        let m = self.m(p);
+        !m.vol.disguise_busted
+            && m.alt_species != 0
+            && m.species != m.alt_species
+            && self.dex.species_id("mimikyu") == Some(m.base_species)
+    }
+
+    /// The blocked hit still has to change the forme (Showdown's onUpdate).
+    #[inline]
+    pub(crate) fn disguise_bust_pending(&self, p: Pos) -> bool {
+        let m = self.m(p);
+        m.vol.disguise_busted
+            && m.alt_species != 0
+            && m.species != m.alt_species
+            && self.dex.species_id("mimikyu") == Some(m.base_species)
+    }
+
     /// Critical hit roll for one target.
     pub fn roll_crit(&mut self, src: Pos, tgt: Pos, am: &ActiveMove) -> bool {
         if am.confusion_hit {
@@ -814,6 +848,15 @@ impl Battle {
             self.rng.chance(1, den)
         };
         if crit && matches!(self.tab(tgt), Ab::BattleArmor | Ab::ShellArmor) {
+            return false;
+        }
+        // Disguise's onCriticalHit: an intact Mimikyu cannot be hit critically. The roll
+        // above already happened; a Substitute in front of it takes the hit as usual.
+        if crit
+            && self.tab(tgt) == Ab::Disguise
+            && self.disguise_intact(tgt)
+            && !(self.m(tgt).vol.substitute > 0 && tgt != src && am.flags & flag::SOUND == 0 && !am.infiltrates && am.flags & flag::BYPASSSUB == 0)
+        {
             return false;
         }
         crit
