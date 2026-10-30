@@ -203,6 +203,11 @@ tag_enum!(Ab {
     WimpOut = "wimpout",
     ZeroToHero = "zerotohero",
     WindRider = "windrider",
+    AromaVeil = "aromaveil",
+    CheekPouch = "cheekpouch",
+    EffectSpore = "effectspore",
+    SeedSower = "seedsower",
+    TangledFeet = "tangledfeet",
 });
 
 tag_enum!(It {

@@ -1208,6 +1208,10 @@ impl Battle {
         if self.it(tgt) == It::BrightPowder {
             c.mul4096(3686);
         }
+        // Tangled Feet (onModifyAccuracy, priority -1): halved while the holder is confused.
+        if self.tab(tgt) == Ab::TangledFeet && self.m(tgt).vol.confusion > 0 {
+            c.mul4096(2048);
+        }
         acc = c.apply(acc);
         // Accuracy / evasion stages.
         let mut boost: i32 = 0;

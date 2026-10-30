@@ -368,6 +368,12 @@ impl Battle {
     // ---- volatiles ---------------------------------------------------------------------
 
     /// Add a volatile status. Returns true on success.
+    /// Aroma Veil's onAllyTryAddVolatile: the holder and its ally block six volatiles.
+    pub(crate) fn aroma_veil(&self, t: Pos) -> bool {
+        self.tab(t) == Ab::AromaVeil
+            || self.live_ally(t).map(|a| self.tab(a) == Ab::AromaVeil).unwrap_or(false)
+    }
+
     pub fn add_volatile(&mut self, tgt: Pos, v: VolKind, src: Option<Pos>) -> bool {
         if !self.is_live(tgt) {
             return false;
@@ -376,6 +382,14 @@ impl Battle {
         let grounded_misty =
             self.field.terrain == Terrain::Misty && self.is_grounded(tgt) && self.m(tgt).vol.semi_inv == crate::state::SemiInv::None;
         match v {
+            // Aroma Veil blocks these six before any of their side effects (Encore's
+            // queued-action change, Mental Herb consumption, ...).
+            VolKind::Taunt | VolKind::Disable | VolKind::Encore | VolKind::HealBlock
+            | VolKind::Torment | VolKind::Attract
+                if self.aroma_veil(tgt) =>
+            {
+                return false;
+            }
             VolKind::Flinch => {
                 if tab == Ab::InnerFocus {
                     return false;
@@ -811,6 +825,12 @@ impl Battle {
     pub fn eat_item(&mut self, p: Pos) {
         self.mm(p).ate_berry = true;
         self.consume_item(p);
+        // Cheek Pouch's onEatItem: a third of the base max HP.
+        if self.is_live(p) && self.ab(p) == Ab::CheekPouch {
+            self.reveal_ability(p);
+            let h = self.m(p).max_hp as u32 / 3;
+            self.heal(p, h);
+        }
     }
 
     fn symbiosis(&mut self, p: Pos) {

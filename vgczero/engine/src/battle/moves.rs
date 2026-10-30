@@ -1790,6 +1790,9 @@ impl Battle {
                 return true;
             }
             MoveFx::Encore => {
+                if self.aroma_veil(t) {
+                    return false;
+                }
                 if !self.is_live(t) || self.m(t).vol.encore > 0 {
                     return false;
                 }
@@ -1821,6 +1824,9 @@ impl Battle {
                 return true;
             }
             MoveFx::Disable => {
+                if self.aroma_veil(t) {
+                    return false;
+                }
                 if !self.is_live(t) || self.m(t).vol.disable > 0 {
                     return false;
                 }
@@ -2350,6 +2356,36 @@ impl Battle {
                     let m = self.m(t);
                     if (m.hp as u32) * 2 <= m.max_hp as u32 && (m.hp as u32 + dealt) * 2 > m.max_hp as u32 {
                         self.boost(t, &ups(B_SPA, 1), BoostSrc::SelfInflicted);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Seed Sower and Effect Spore act observably (terrain, a status roll); Showdown runs
+        // the target's DamagingHit handlers while it is at 0 HP but not yet fainted.
+        if self.active_unfainted(t) {
+            match tab {
+                Ab::SeedSower => {
+                    self.reveal_ability(t);
+                    self.set_terrain(Terrain::Grassy, t);
+                }
+                // The powder check decides whether the roll happens at all.
+                Ab::EffectSpore
+                    if contact
+                        && !(self.m(p).has_type(Type::Grass) || self.tab(p) == Ab::Overcoat) =>
+                {
+                    let r = self.rng.below(100);
+                    let st = if r < 11 {
+                        Status::Slp
+                    } else if r < 21 {
+                        Status::Par
+                    } else if r < 30 {
+                        Status::Psn
+                    } else {
+                        Status::None
+                    };
+                    if st != Status::None {
+                        self.try_set_status(p, st, Some(t));
                     }
                 }
                 _ => {}
