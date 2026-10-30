@@ -444,6 +444,9 @@ tag_enum!(MoveFx {
     MetalBurst = "metalburst",
     InfernalParade = "infernalparade",
     NightShade = "nightshade",
+    Minimize = "minimize",
+    Stockpile = "stockpile",
+    SnipeShot = "snipeshot",
 });
 
 /// Moves whose Showdown callbacks are fully reproduced by the engine's generic

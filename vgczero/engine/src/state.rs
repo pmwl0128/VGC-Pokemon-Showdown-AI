@@ -72,6 +72,8 @@ pub struct Vol {
     pub charge_target: i8,
     pub semi_inv: SemiInv,
     pub must_recharge: bool,
+    /// Minimize's volatile: minimize-flagged moves always hit it for double damage.
+    pub minimize: bool,
     pub crit_stage: u8,
     /// Choice item lock: move slot + 1.
     pub choice_lock: u8,

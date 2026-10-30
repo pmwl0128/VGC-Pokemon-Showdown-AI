@@ -412,6 +412,13 @@ impl Battle {
                 self.check_status_berry(tgt);
             }
             VolKind::MustRecharge => self.mm(tgt).vol.must_recharge = true,
+            VolKind::Minimize => {
+                // onRestart returns null: a second Minimize keeps the volatile but fails to add.
+                if self.m(tgt).vol.minimize {
+                    return false;
+                }
+                self.mm(tgt).vol.minimize = true;
+            }
             VolKind::Taunt => {
                 if self.m(tgt).vol.taunt > 0 || tab == Ab::Oblivious {
                     return false;

@@ -567,7 +567,7 @@ impl Battle {
     /// also for moves aimed at the user's own ally), then Lightning Rod /
     /// Storm Drain of any other Pokemon (priority 0).
     fn redirect(&mut self, p: Pos, am: &ActiveMove, t: Pos) -> Pos {
-        if matches!(self.ab(p), Ab::Stalwart) {
+        if matches!(self.ab(p), Ab::Stalwart) || self.dex.mv(am.id).tracks_target {
             return t;
         }
         let powder_immune = self.m(p).has_type(Type::Grass) || self.ab(p) == Ab::Overcoat;
@@ -738,6 +738,7 @@ impl Battle {
                     }
             }
             MoveFx::NoRetreat => !self.m(p).vol.no_retreat,
+            MoveFx::Stockpile => self.m(p).vol.stockpile < 3,
             MoveFx::DestinyBond => !(self.m(p).vol.last_move_slot == am.mslot && self.m(p).vol.destiny_bond),
             _ => true,
         }

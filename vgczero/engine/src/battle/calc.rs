@@ -1045,6 +1045,10 @@ impl Battle {
         if t.vol.glaive_rush > 0 {
             h.add(0, sd, SUB_COND, fm(2, 1), d.cr(Cond::GlaiveRush));
         }
+        // Minimize's onSourceModifyDamage: minimize-flagged moves deal double damage.
+        if t.vol.minimize && am.flags & flag::MINIMIZE != 0 {
+            h.add(0, sd, SUB_COND, fm(2, 1), d.cr(Cond::Minimize));
+        }
         let mid = d.mv(am.id).id.as_str();
         match t.vol.semi_inv {
             SemiInv::Underground => {
@@ -1143,17 +1147,20 @@ impl Battle {
         }
         // runEvent('Accuracy'): No Guard's onAnyAccuracy handlers in cached-speed order.
         // Equal speeds shuffle; this event has no other handlers in the pool.
+        // Minimize's onAccuracy (the target's condition) is a handler of the same 'Accuracy'
+        // event as No Guard's onAnyAccuracy: it joins the speed sort and makes the move hit.
+        let minimized = self.m(tgt).vol.minimize && am.flags & flag::MINIMIZE != 0;
         let mut ng = [(0i32, 0u8); 4];
         let mut nn = 0;
         for c in 0..4u8 {
             let q = Pos::from_code(c);
-            if self.active_unfainted(q) && self.tab(q) == Ab::NoGuard {
+            if self.active_unfainted(q) && (self.tab(q) == Ab::NoGuard || (minimized && q == tgt)) {
                 ng[nn] = (self.m(q).speed, c);
                 nn += 1;
             }
         }
         crate::rng::speed_sort(&mut self.rng, &mut ng[..nn], |a, b| b.0.cmp(&a.0));
-        if self.ab(src) == Ab::NoGuard || self.tab(tgt) == Ab::NoGuard {
+        if self.ab(src) == Ab::NoGuard || self.tab(tgt) == Ab::NoGuard || minimized {
             return true;
         }
         if am.accuracy == 0 {

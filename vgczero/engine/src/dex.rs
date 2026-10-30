@@ -141,6 +141,7 @@ pub mod flag {
     pub const FUTUREMOVE: u32 = 1 << 25;
     pub const MUSTPRESSURE: u32 = 1 << 26;
     pub const NOPARENTALBOND: u32 = 1 << 27;
+    pub const MINIMIZE: u32 = 1 << 28;
 
     pub fn parse(name: &str) -> u32 {
         match name {
@@ -172,6 +173,7 @@ pub mod flag {
             "futuremove" => FUTUREMOVE,
             "mustpressure" => MUSTPRESSURE,
             "noparentalbond" => NOPARENTALBOND,
+            "minimize" => MINIMIZE,
             _ => 0,
         }
     }
@@ -244,6 +246,7 @@ pub enum VolKind {
     DragonCheer,
     TarShot,
     SmackDown,
+    Minimize,
     Unsupported,
 }
 
@@ -287,6 +290,7 @@ impl VolKind {
             "dragoncheer" => VolKind::DragonCheer,
             "tarshot" => VolKind::TarShot,
             "smackdown" => VolKind::SmackDown,
+            "minimize" => VolKind::Minimize,
             _ => VolKind::Unsupported,
         }
     }
@@ -473,6 +477,8 @@ pub struct MoveData {
     pub thaws_target: bool,
     pub sleep_usable: bool,
     pub smart_target: bool,
+    /// tracksTarget: the move ignores redirection (Follow Me, Lightning Rod...).
+    pub tracks_target: bool,
     pub override_offensive_stat: Option<usize>,
     pub override_defensive_stat: Option<usize>,
     pub foul_play: bool,
@@ -610,6 +616,7 @@ conds! {
     Leftovers = "leftovers",
     LightScreen = "lightscreen",
     MagnetRise = "magnetrise",
+    Minimize = "minimize",
     Mist = "mist",
     MistyTerrain = "mistyterrain",
     Moody = "moody",
@@ -1195,6 +1202,7 @@ fn parse_move(mv: &Value) -> MoveData {
         thaws_target: b(mv, "thawsTarget"),
         sleep_usable: b(mv, "sleepUsable"),
         smart_target: b(mv, "smartTarget"),
+        tracks_target: b(mv, "tracksTarget"),
         override_offensive_stat: stat_index(&s(mv, "overrideOffensiveStat")),
         override_defensive_stat: stat_index(&s(mv, "overrideDefensiveStat")),
         foul_play: s(mv, "overrideOffensivePokemon") == "target",

@@ -528,6 +528,7 @@ impl Battle {
                 "phantomforce" | "shadowforce" => v.semi_inv = SemiInv::Shadow,
                 "solarbeam" | "solarblade" | "electroshot" | "meteorbeam" => {}
                 "mustrecharge" => v.must_recharge = true,
+                "minimize" => v.minimize = true,
                 "focusenergy" => crit_stage = crit_stage.max(2),
                 "dragoncheer" => crit_stage = crit_stage.max(if b(st, "hasDragonType") { 2 } else { 1 }),
                 "choicelock" => v.choice_lock = slot_of(s(st, "move"))? + 1,
