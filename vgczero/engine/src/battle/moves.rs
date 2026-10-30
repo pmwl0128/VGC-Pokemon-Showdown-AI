@@ -314,9 +314,8 @@ impl Battle {
             } else if mv.fx == MoveFx::KingsShield {
                 self.mm(p).set_alt_forme(false);
             }
-            // setSpecies resets the cached speed to the raw stat; Showdown resolves the forme
-            // change before updateSpeed, so the action speed (tailwind included) is back.
-            self.mm(p).speed = self.action_speed(p);
+            // setSpecies leaves the cached speed at the new raw Speed stat; Tailwind, items
+            // and boosts are not re-applied until the next updateSpeed.
         }
         let mut am = self.make_active_move(p, move_id, mslot, struggle);
         self.resolve_move_type(p, &mut am);

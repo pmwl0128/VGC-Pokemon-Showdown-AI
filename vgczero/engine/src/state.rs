@@ -296,6 +296,12 @@ impl Mon {
         if self.alt_species == 0 {
             return;
         }
+        // Showdown's Stance Change only calls formeChange when the forme differs; a switch
+        // to the forme already held does not touch the stats or the cached speed.
+        let target = if alt { self.alt_species } else { self.base_species };
+        if self.species == target {
+            return;
+        }
         if alt {
             self.species = self.alt_species;
             for k in 1..6 {
