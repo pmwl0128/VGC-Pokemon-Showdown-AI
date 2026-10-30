@@ -76,6 +76,9 @@ pub struct Vol {
     pub minimize: bool,
     /// Showdown's abilityState.busted: a hit was blocked while the forme was intact.
     pub disguise_busted: bool,
+    /// Showdown's `pokemon.illusion`: the party member this Pokemon shows itself as
+    /// (0 = none). Set on switch-in, cleared by a damaging hit or on leaving the field.
+    pub illusion_species: SpeciesId,
     pub crit_stage: u8,
     /// Choice item lock: move slot + 1.
     pub choice_lock: u8,
@@ -217,7 +220,6 @@ pub struct Mon {
     /// Berry eaten this battle (Cud Chew, Belch) / item knocked off.
     pub ate_berry: bool,
     pub item_knocked: bool,
-    pub illusion: bool,
 }
 
 impl Mon {
@@ -281,7 +283,6 @@ impl Mon {
             reveal: Reveal::default(),
             ate_berry: false,
             item_knocked: false,
-            illusion: false,
         }
     }
 

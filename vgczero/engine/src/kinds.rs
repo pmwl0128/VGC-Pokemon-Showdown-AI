@@ -209,6 +209,7 @@ tag_enum!(Ab {
     SeedSower = "seedsower",
     TangledFeet = "tangledfeet",
     Disguise = "disguise",
+    Illusion = "illusion",
 });
 
 tag_enum!(It {

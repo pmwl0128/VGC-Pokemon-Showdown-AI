@@ -108,7 +108,27 @@ impl Battle {
                 m.vol.no_retreat = v.no_retreat;
             }
         }
+        // runSwitch's BeforeSwitchIn event (pinned illusion's onBeforeSwitchIn): the last
+        // unfainted party member behind this slot; an active ally counts when it sits after
+        // the slot.
+        if self.dex.ab(self.m(p).ability) == Ab::Illusion {
+            let pick = self.illusion_target(p.s(), p.i());
+            self.mm(p).vol.illusion_species = pick;
+        }
         blog!(self, "|switch|{}|{}/{}", self.name(p), self.m(p).hp, self.m(p).max_hp);
+    }
+
+    /// Pinned illusion's onBeforeSwitchIn: scan the party order from the end down to
+    /// `slot + 1` and take the first unfainted member (0 when there is none).
+    pub fn illusion_target(&self, side: usize, slot: usize) -> crate::dex::SpeciesId {
+        let s = &self.sides[side];
+        for k in (slot + 1..6).rev() {
+            let i = s.order[k] as usize;
+            if !s.mons[i].fainted {
+                return s.mons[i].species;
+            }
+        }
+        0
     }
 
     /// Forced out (Red Card, Roar...): random replacement.

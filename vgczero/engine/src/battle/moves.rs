@@ -1996,7 +1996,9 @@ impl Battle {
                     return false;
                 }
                 let (a, b) = (self.m(p).ability, self.m(t).ability);
-                if self.dex.ability(a).cantsuppress || self.dex.ability(b).cantsuppress {
+                // Pinned battle.ts skillSwap: either side's failskillswap refuses it
+                // (cantsuppress is not the flag that guard reads).
+                if self.dex.ability(a).failskillswap || self.dex.ability(b).failskillswap {
                     return false;
                 }
                 self.mm(p).ability = b;
@@ -2024,6 +2026,14 @@ impl Battle {
                     self.m(p).ability
                 };
                 if self.m(t).ability == new || self.dex.ability(self.m(t).ability).cantsuppress {
+                    return false;
+                }
+                // Pinned entrainment / worryseed: a Truant target refuses both, and an
+                // ability marked noentrain cannot be passed on at all.
+                if self.dex.ability_id("truant").is_some_and(|tr| self.m(t).ability == tr) {
+                    return false;
+                }
+                if am.fx == MoveFx::Entrainment && self.dex.ability(new).noentrain {
                     return false;
                 }
                 self.mm(t).ability = new;
@@ -2403,6 +2413,10 @@ impl Battle {
         if self.m(t).item != 0 && self.dex.it(self.m(t).item) == It::AirBalloon {
             blog!(self, "|-enditem|{}|Air Balloon", self.name(t));
             self.consume_item(t);
+        }
+        // Illusion's onDamagingHit: a hit reveals the holder (pinned `End`).
+        if self.m(t).vol.illusion_species != 0 {
+            self.mm(t).vol.illusion_species = 0;
         }
         // The target's onDamagingHit runs even when the hit knocked it out
         // (it faints only after the move).

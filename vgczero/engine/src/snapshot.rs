@@ -319,6 +319,15 @@ impl Battle {
 
     fn load_mon(&mut self, sidx: usize, idx: usize, mv: &Value) -> R<()> {
         let d = dex();
+        // An active illusion is derived before the mutable borrow below: the dump only
+        // carries the flag, and the pinned rule (the last unfainted party member behind
+        // the slot) is deterministic from the imported party.
+        let illusion_species = if b(mv, "illusion") {
+            let slot = if b(mv, "active") { i(mv, "position").max(0) as usize } else { 6 };
+            self.illusion_target(sidx, slot)
+        } else {
+            0
+        };
         let m = &mut self.sides[sidx].mons[idx];
         m.brought = true;
         let sp = s(mv, "species");
@@ -393,9 +402,10 @@ impl Battle {
             }
         }
         m.weight_hg = i(mv, "weighthg") as u32;
-        if b(mv, "transformed") || b(mv, "illusion") {
-            return Err("transform / illusion unsupported".into());
+        if b(mv, "transformed") {
+            return Err("transform unsupported".into());
         }
+        m.vol.illusion_species = illusion_species;
         // Moves and PP (must be the set's moves, in order).
         let moves = mv.get("moves").and_then(|x| x.as_array()).ok_or("mon without moves")?;
         if moves.len() != m.n_moves as usize {

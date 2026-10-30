@@ -678,6 +678,10 @@ pub struct AbilityData {
     pub kind: Ab,
     pub breakable: bool,
     pub cantsuppress: bool,
+    /// Pinned ability flags the swap guards read: Skill Swap refuses either side's
+    /// `failskillswap`, Entrainment refuses a source ability marked `noentrain`.
+    pub failskillswap: bool,
+    pub noentrain: bool,
     pub callbacks: Vec<String>,
     pub hooks: Hooks,
     pub unsupported: Vec<String>,
@@ -924,6 +928,8 @@ impl Dex {
                 kind,
                 breakable: fl.map(|f| b(f, "breakable")).unwrap_or(false),
                 cantsuppress: fl.map(|f| b(f, "cantsuppress")).unwrap_or(false),
+                failskillswap: fl.map(|f| b(f, "failskillswap")).unwrap_or(false),
+                noentrain: fl.map(|f| b(f, "noentrain")).unwrap_or(false),
                 hooks: Hooks::parse(ab, &callbacks),
                 callbacks,
                 unsupported,
