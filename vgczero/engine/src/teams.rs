@@ -16,7 +16,8 @@ pub struct MegaSpec {
 }
 
 /// A battle-only forme the set can change into (Aegislash-Blade by Stance
-/// Change, Palafin-Hero by Zero to Hero), with its stats for this set.
+/// Change, Palafin-Hero by Zero to Hero, Mimikyu-Busted by Disguise), with
+/// its stats for this set.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct AltForme {
     pub species: SpeciesId,
