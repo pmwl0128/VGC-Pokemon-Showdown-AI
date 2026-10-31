@@ -1264,6 +1264,13 @@ impl Battle {
             MoveFx::LeechSeed => !self.m(t).has_type(Type::Grass),
             // Endeavor's onTryImmunity: the user must have less HP.
             MoveFx::Endeavor => self.m(p).hp < self.m(t).hp,
+            // Worry Seed's onTryImmunity: a Truant or Insomnia target fails here, before the
+            // accuracy check, and the failure counts for Stomping Tantrum (data/moves.ts:21054).
+            MoveFx::WorrySeed => {
+                let ab = self.m(t).ability;
+                !(self.dex.ability_id("truant").is_some_and(|x| x == ab)
+                    || self.dex.ability_id("insomnia").is_some_and(|x| x == ab))
+            }
             _ => true,
         }
     }
@@ -2160,6 +2167,9 @@ impl Battle {
                 if !self.try_set_status(p, Status::Slp, Some(p)) {
                     return false;
                 }
+                // Pinned Rest.onHit overwrites what slp.onStart drew: the draw still happens,
+                // but Rest always sleeps for 3 turns (data/moves.ts:14979-14982).
+                self.mm(p).status_turns = 3;
                 self.heal(p, mh);
                 self.check_status_berry(p);
                 return true;
@@ -2749,5 +2759,115 @@ impl Battle {
         }
         let h = if self.it(p) == It::BigRoot { super::calc::modify(h, 5324, 4096) } else { h };
         self.heal(p, h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::battle::{BattleConfig, Phase};
+    use crate::dex::{dex, load_dex};
+    use crate::state::NO_MON;
+    use crate::teams::{parse_team, TeamSpec};
+    use serde_json::json;
+
+    fn setup() {
+        load_dex(&crate::data_path("dex.json.gz")).unwrap();
+    }
+
+    fn filler() -> serde_json::Value {
+        json!({"species": "snorlax", "ability": "thickfat", "item": "", "moves": ["tackle"],
+               "stats": [200, 110, 65, 65, 110, 30], "types": ["Normal"], "weightkg": 460.0,
+               "level": 50})
+    }
+
+    fn team(sets: Vec<serde_json::Value>) -> TeamSpec {
+        let mut mons = sets;
+        while mons.len() < 6 {
+            mons.push(filler());
+        }
+        parse_team(&json!({"name": "test", "mons": mons}))
+    }
+
+    /// A battle already in the move phase, mon 0 of each side on the field.
+    fn fielded(side0: &TeamSpec, side1: &TeamSpec, seed: u64) -> Battle {
+        let mut b = Battle::new([side0, side1], seed, BattleConfig::default());
+        b.phase = Phase::Move;
+        for s in 0..2 {
+            b.sides[s].active = [0, NO_MON];
+            b.sides[s].mons[0].brought = true;
+            b.sides[s].mons[0].slot = 0;
+        }
+        b
+    }
+
+    /// Pinned Rest.onHit overwrites what slp.onStart drew (data/moves.ts:14979-14982): the draw
+    /// still happens, but the sleep is always three turns. Adopting the drawn 2/3 value slept one
+    /// turn less than Showdown.
+    #[test]
+    fn rest_always_sleeps_three_turns() {
+        setup();
+        let user = team(vec![json!({"species": "snorlax", "ability": "thickfat", "item": "",
+                                    "moves": ["rest", "tackle"],
+                                    "stats": [400, 110, 65, 65, 110, 30],
+                                    "types": ["Normal"], "weightkg": 460.0, "level": 50})]);
+        let foe = team(vec![]);
+        let mut seen = [0u32; 4];
+        for seed in 0..60u64 {
+            let mut b = fielded(&user, &foe, seed);
+            let p = Pos::new(0, 0);
+            b.mm(p).hp = 100;
+            let am = b.make_active_move(p, dex().move_id("rest").unwrap(), 0, false);
+            assert!(b.status_move_effects(p, p, &am));
+            assert_eq!(b.m(p).status, Status::Slp, "seed {seed}");
+            assert_eq!(b.m(p).status_turns, 3, "seed {seed}: Rest sleeps three turns");
+            seen[3] += 1;
+        }
+        assert_eq!(seen[3], 60);
+    }
+
+    /// Pinned Worry Seed.onTryImmunity (data/moves.ts:21054-21060): a Truant or Insomnia target
+    /// fails at the immunity step, before the accuracy check.
+    #[test]
+    fn worry_seed_is_immune_on_a_truant_or_insomnia_target() {
+        setup();
+        let user = team(vec![json!({"species": "whimsicott", "ability": "prankster", "item": "",
+                                    "moves": ["worryseed"],
+                                    "stats": [200, 90, 100, 90, 90, 116],
+                                    "types": ["Grass", "Fairy"], "weightkg": 6.6, "level": 50})]);
+        let foe = team(vec![json!({"species": "hypno", "ability": "insomnia", "item": "",
+                                   "moves": ["tackle"], "stats": [200, 90, 90, 90, 115, 67],
+                                   "types": ["Psychic"], "weightkg": 75.6, "level": 50})]);
+        let mut b = fielded(&user, &foe, 1);
+        let (p, t) = (Pos::new(0, 0), Pos::new(1, 0));
+        let am = b.make_active_move(p, dex().move_id("worryseed").unwrap(), 0, false);
+        assert!(!b.immunity_check(p, t, &am), "Insomnia is immune to Worry Seed");
+        b.sides[1].mons[0].ability = dex().ability_id("thickfat").unwrap();
+        assert!(b.immunity_check(p, t, &am), "an ordinary ability is not immune");
+    }
+
+    /// Pinned Illusion.onBeforeSwitchIn scans `side.pokemon`, which holds only the four brought
+    /// members; scanning all six ever picked a Pokemon left behind in the party.
+    #[test]
+    fn illusion_never_copies_a_member_left_behind() {
+        setup();
+        let zoro = team(vec![json!({"species": "zoroark", "ability": "illusion", "item": "",
+                                    "moves": ["nightslash"],
+                                    "stats": [200, 110, 60, 120, 60, 105],
+                                    "types": ["Dark"], "weightkg": 81.1, "level": 50})]);
+        let foe = team(vec![]);
+        let mut b = fielded(&zoro, &foe, 2);
+        b.sides[0].order = [0, 1, 2, 3, 4, 5];
+        for i in 0..6 {
+            b.sides[0].mons[i].brought = i < 4;
+            b.sides[0].mons[i].fainted = false;
+        }
+        // A brought member behind slot 0 confirms the scan still finds it.
+        assert_eq!(b.illusion_target(0, 0), b.sides[0].mons[3].species);
+        // With every brought member behind the slot fainted, only the left-behind pair is alive.
+        for i in 1..4 {
+            b.sides[0].mons[i].fainted = true;
+        }
+        assert_eq!(b.illusion_target(0, 0), 0, "a Pokemon left behind is never the disguise");
     }
 }

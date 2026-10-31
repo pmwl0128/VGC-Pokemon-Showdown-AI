@@ -119,12 +119,14 @@ impl Battle {
     }
 
     /// Pinned illusion's onBeforeSwitchIn: scan the party order from the end down to
-    /// `slot + 1` and take the first unfainted member (0 when there is none).
+    /// `slot + 1` and take the first unfainted member (0 when there is none). Only brought
+    /// members are candidates: pinned scans `side.pokemon`, which holds the four brought ones,
+    /// while `order[4..6]` holds the ones left behind (never fainted, so they must be skipped).
     pub fn illusion_target(&self, side: usize, slot: usize) -> crate::dex::SpeciesId {
         let s = &self.sides[side];
         for k in (slot + 1..6).rev() {
             let i = s.order[k] as usize;
-            if !s.mons[i].fainted {
+            if s.mons[i].brought && !s.mons[i].fainted {
                 return s.mons[i].species;
             }
         }
