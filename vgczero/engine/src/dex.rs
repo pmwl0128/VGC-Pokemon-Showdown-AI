@@ -606,6 +606,7 @@ conds! {
     FlashFire = "flashfire",
     Flinch = "flinch",
     Fly = "fly",
+    FocusPunch = "focuspunch",
     FollowMe = "followme",
     GlaiveRush = "glaiverush",
     GrassyTerrain = "grassyterrain",

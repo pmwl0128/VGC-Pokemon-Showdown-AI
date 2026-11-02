@@ -408,7 +408,8 @@ impl Battle {
                 return false;
             }
             VolKind::Flinch => {
-                if tab == Ab::InnerFocus {
+                // focuspunch.onTryAddVolatile: a focusing Pokemon cannot flinch.
+                if tab == Ab::InnerFocus || self.m(tgt).vol.focus_punch > 0 {
                     return false;
                 }
                 self.mm(tgt).vol.flinch = true;

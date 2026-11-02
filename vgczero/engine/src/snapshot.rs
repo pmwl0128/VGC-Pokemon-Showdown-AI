@@ -549,6 +549,7 @@ impl Battle {
                 "mustrecharge" => v.must_recharge = true,
                 "chillyreception" => v.chilly_reception = true,
                 "fling" => v.fling = true,
+                "focuspunch" => v.focus_punch = if b(st, "lostFocus") { 2 } else { 1 },
                 "lockedmove" => {
                     v.locked_move = slot_of(s(st, "move"))? + 1;
                     v.locked_dur = dur;

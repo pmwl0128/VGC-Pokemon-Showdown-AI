@@ -61,6 +61,9 @@ pub struct Vol {
     pub chilly_reception: bool,
     /// Showdown's fling volatile: the flung item is used up at the Update after the move.
     pub fling: bool,
+    /// Showdown's focuspunch volatile (priorityChargeCallback, duration 1): 1 focusing, 2 hit
+    /// by a damaging move since (lostFocus: the move is lost at beforeMoveCallback).
+    pub focus_punch: u8,
     /// Showdown's lockedmove volatile (Outrage, Thrash, Petal Dance): the locked move slot + 1,
     /// the remaining duration (2, refreshed by each hit while true turns remain) and the true
     /// duration drawn at the start (2 or 3); fatigue confusion when it ends with none left.
@@ -168,7 +171,6 @@ pub struct Vol {
     /// Already moved / Quash ordering.
     pub quashed: bool,
     pub sky_drop: bool,
-    pub focus_punch: bool,
     pub destiny_bond_pending: bool,
     /// Supreme Overlord: fainted allies when it entered (max 5).
     pub fallen: u8,

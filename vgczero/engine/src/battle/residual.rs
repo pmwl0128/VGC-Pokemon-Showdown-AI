@@ -47,6 +47,7 @@ enum Res {
     Stall,
     AllySwitch,
     ChillyReception,
+    FocusPunch,
     LockedMove,
     HelpingHand,
     FollowMe,
@@ -321,6 +322,9 @@ impl Battle {
                 if w.chilly_reception {
                     v.push(mon(LAST, 2, Cond::ChillyReception, Res::ChillyReception));
                 }
+                if w.focus_punch > 0 {
+                    v.push(mon(LAST, 2, Cond::FocusPunch, Res::FocusPunch));
+                }
                 if w.locked_dur > 0 {
                     v.push(mon(LAST, 2, Cond::LockedMove, Res::LockedMove));
                 }
@@ -500,6 +504,7 @@ impl Battle {
                     Res::Stall => v.stall_dur == 1,
                     Res::AllySwitch => v.ally_switch_dur == 1,
                     Res::ChillyReception => true,
+                    Res::FocusPunch => true,
                     Res::LockedMove => v.locked_dur == 1,
                     Res::Taunt => v.taunt == 1,
                     Res::Encore => v.encore == 1,
@@ -676,6 +681,7 @@ impl Battle {
             Res::HelpingHand => self.mm(p).vol.helping_hand = 0,
             Res::FollowMe => self.mm(p).vol.follow_me = 0,
             Res::ChillyReception => self.mm(p).vol.chilly_reception = false,
+            Res::FocusPunch => self.mm(p).vol.focus_punch = 0,
             Res::LockedMove => {
                 // Showdown counts the duration down first: at 0 the effect ends (onEnd) and
                 // onResidual does not run; otherwise onResidual drops the lock of a sleeping

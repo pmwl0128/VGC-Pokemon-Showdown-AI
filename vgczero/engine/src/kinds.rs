@@ -327,6 +327,7 @@ tag_enum!(MoveFx {
     SpeedSwap = "speedswap",
     ChillyReception = "chillyreception",
     Fling = "fling",
+    FocusPunch = "focuspunch",
     ExpandingForce = "expandingforce",
     WeatherBall = "weatherball",
     TerrainPulse = "terrainpulse",

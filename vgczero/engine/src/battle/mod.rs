@@ -725,6 +725,9 @@ impl Battle {
                         if mv.fx == crate::kinds::MoveFx::ChillyReception {
                             self.mm(p).vol.chilly_reception = true;
                         }
+                        if mv.fx == crate::kinds::MoveFx::FocusPunch {
+                            self.mm(p).vol.focus_punch = 1;
+                        }
                         // A recharge turn is Showdown's 'recharge' move: priority 0, target self.
                         if recharge {
                             a.priority = 0;
@@ -874,6 +877,9 @@ impl Battle {
         let d = self.dex;
         if d.mv(move_id).fx == crate::kinds::MoveFx::ChillyReception {
             self.mm(p).vol.chilly_reception = true;
+        }
+        if d.mv(move_id).fx == crate::kinds::MoveFx::FocusPunch {
+            self.mm(p).vol.focus_punch = 1;
         }
         let mut a = Action {
             kind: ActionKind::Move { mslot: mslot as u8, target: TARGET_RANDOM, recharge: false },

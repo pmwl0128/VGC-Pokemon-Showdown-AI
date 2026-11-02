@@ -95,6 +95,13 @@ impl Battle {
             return;
         }
 
+        // beforeMoveCallback (Focus Punch): after the BeforeMove event, before any PP, a
+        // focusing user that was hit loses the move; moveThisTurnResult is false.
+        if d.mv(move_id).fx == MoveFx::FocusPunch && self.m(p).vol.focus_punch == 2 {
+            blog!(self, "|cant|{}|Focus Punch|Focus Punch", self.name(p));
+            self.mm(p).vol.this_move_failed = true;
+            return;
+        }
         // PP and last-move bookkeeping (moveUsed).
         let struggle = move_id == d.struggle;
         if !struggle && !charging && !locked {
@@ -2529,13 +2536,26 @@ impl Battle {
         if am.fx == MoveFx::Fling {
             let item = self.dex.item(self.m(p).item);
             let (st, vk) = (item.fling_status, item.fling_volatile);
-            if sub_hit || !self.is_live(t) || self.tab(t) == Ab::ShieldDust {
+            // Shield Dust's ModifySecondaries empties the list before any roll.
+            if self.tab(t) == Ab::ShieldDust {
                 return;
             }
-            if st != Status::None {
-                self.try_set_status(t, st, Some(p));
-            } else if let Some(v) = vk {
-                self.add_volatile(t, v, Some(p));
+            // Fling's secondaries exist (empty) at ModifyMove, so King's Rock pushes its 10%
+            // flinch first; PrepareHit then appends the item's own effect. Showdown draws a
+            // secondaryRoll for every secondary, with or without a chance.
+            if self.it(p) == It::KingsRock {
+                let roll = self.rng.below(100);
+                if roll < 10 && self.is_live(t) && !sub_hit {
+                    self.add_volatile(t, VolKind::Flinch, Some(p));
+                }
+            }
+            let _ = self.rng.below(100);
+            if self.is_live(t) && !sub_hit {
+                if st != Status::None {
+                    self.try_set_status(t, st, Some(p));
+                } else if let Some(v) = vk {
+                    self.add_volatile(t, v, Some(p));
+                }
             }
             return;
         }
@@ -2623,6 +2643,10 @@ impl Battle {
     /// onDamagingHit: contact abilities, Rocky Helmet, Stamina, Weakness
     /// Policy, Justified, Cursed Body...
     fn on_damaging_hit(&mut self, p: Pos, t: Pos, am: &ActiveMove, dealt: u32) {
+        // focuspunch.onHit: a damaging hit breaks the focus.
+        if self.m(t).vol.focus_punch == 1 {
+            self.mm(t).vol.focus_punch = 2;
+        }
         let _ = dealt;
         let contact = self.makes_contact(p, am);
         // A Fire-type hit thaws a frozen target.
@@ -3410,6 +3434,33 @@ mod tests {
         }
         assert!((105..=160).contains(&hits[0]), "attack: {} of {n}", hits[0]);
         assert!((38..=85).contains(&hits[1]), "status move: {} of {n}", hits[1]);
+    }
+
+    /// Pinned focuspunch: the focus set when the action is queued is broken by a damaging hit
+    /// (the volatile's onHit); a focusing Pokemon cannot flinch; the broken focus costs the move
+    /// at beforeMoveCallback (after the BeforeMove event, before any PP), counting as a failure.
+    #[test]
+    fn focus_punch_loses_focus_when_hit() {
+        setup();
+        let user = team(vec![json!({"species": "annihilape", "ability": "defiant", "item": "",
+                                    "moves": ["focuspunch", "protect"], "stats": [217, 162, 100, 70, 110, 110],
+                                    "types": ["Fighting", "Ghost"], "weightkg": 56.0, "level": 50})]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 31);
+        let p = Pos::new(0, 0);
+        let t = Pos::new(1, 0);
+        b.mm(p).vol.focus_punch = 1;
+        assert!(!b.add_volatile(p, VolKind::Flinch, Some(t)), "no flinch while focusing");
+        assert!(!b.m(p).vol.flinch);
+        let am = b.make_active_move(t, b.m(t).moves[0], 0, false);
+        b.on_damaging_hit(t, p, &am, 10);
+        assert_eq!(b.m(p).vol.focus_punch, 2, "a damaging hit breaks the focus");
+        let pp0 = b.m(p).pp[0];
+        b.run_move_action(p, 0, 0, super::super::targeting::NO_ORIG, dex().move_id("focuspunch").unwrap(), false);
+        assert_eq!(b.m(p).pp[0], pp0, "the lost move costs no PP");
+        assert!(b.m(p).vol.this_move_failed);
+        b.run_residual();
+        assert_eq!(b.m(p).vol.focus_punch, 0, "the volatile lasts one turn");
     }
 
     /// Pinned Rest.onHit overwrites what slp.onStart drew (data/moves.ts:14979-14982): the draw
