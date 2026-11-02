@@ -669,6 +669,9 @@ pub struct ItemData {
     pub is_berry: bool,
     pub is_mega_stone: bool,
     pub fling_bp: u16,
+    /// The item's fling data: the status or volatile Fling inflicts with it (no chance).
+    pub fling_status: Status,
+    pub fling_volatile: Option<VolKind>,
     pub callbacks: Vec<String>,
     pub hooks: Hooks,
     pub unsupported: Vec<String>,
@@ -909,6 +912,13 @@ impl Dex {
                 is_berry: b(it, "isBerry"),
                 is_mega_stone,
                 fling_bp: it.get("fling").map(|f| n(f, "basePower") as u16).unwrap_or(0),
+                fling_status: it.get("fling").map(|f| Status::parse(&s(f, "status"))).unwrap_or(Status::None),
+                fling_volatile: it
+                    .get("fling")
+                    .and_then(|f| f.get("volatileStatus"))
+                    .and_then(|x| x.as_str())
+                    .map(VolKind::parse)
+                    .filter(|v| *v != VolKind::Unsupported),
                 hooks: Hooks::parse(it, &callbacks),
                 callbacks,
                 unsupported,

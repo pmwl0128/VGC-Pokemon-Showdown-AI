@@ -729,11 +729,8 @@ impl Battle {
                         if recharge {
                             a.priority = 0;
                         }
-                        // resolveAction: FractionalPriority (Quick Claw) first, then the target.
-                        if self.m(p).item != 0 && d.it(self.m(p).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
-                            a.frac = 1;
-                            blog!(self, "|-activate|{}|item: Quick Claw", self.name(p));
-                        }
+                        // resolveAction: FractionalPriority (Quick Draw, Quick Claw) first, then the target.
+                        a.frac = self.fractional_priority(p, mid);
                         if recharge {
                             // The locked 'recharge' move keeps lastMoveTargetLoc (no resolution
                             // draw); its getActionSpeed getTarget draws (see recharge_target_draw).
@@ -847,6 +844,24 @@ impl Battle {
         }
     }
 
+    /// resolveAction's FractionalPriority event: Quick Draw (priority -1; 3/10 on a damaging
+    /// move) runs before Quick Claw (-2; 1/5, and only while the fraction is still 0).
+    pub(crate) fn fractional_priority(&mut self, p: Pos, move_id: u16) -> i8 {
+        let d = self.dex;
+        if d.ab(self.m(p).ability) == crate::kinds::Ab::QuickDraw
+            && d.mv(move_id).category != crate::dex::Category::Status
+            && self.rng.chance(3, 10)
+        {
+            blog!(self, "|-activate|{}|ability: Quick Draw", self.name(p));
+            return 1;
+        }
+        if self.m(p).item != 0 && d.it(self.m(p).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
+            blog!(self, "|-activate|{}|item: Quick Claw", self.name(p));
+            return 1;
+        }
+        0
+    }
+
     /// Showdown's queue.changeAction(pokemon, {choice: 'move', moveid}) as Champions Encore
     /// uses it: cancelAction (every queued action of the Pokemon) then insertChoice, whose
     /// resolveAction rolls FractionalPriority, picks a random target and runs getActionSpeed.
@@ -872,10 +887,7 @@ impl Battle {
             loc: 0,
             orig: NO_ORIG,
         };
-        if self.m(p).item != 0 && d.it(self.m(p).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
-            a.frac = 1;
-            blog!(self, "|-activate|{}|item: Quick Claw", self.name(p));
-        }
+        a.frac = self.fractional_priority(p, move_id);
         let (loc, orig) = self.resolve_target(p, move_id, Some(TARGET_RANDOM));
         a.loc = loc;
         a.orig = orig;
@@ -907,10 +919,7 @@ impl Battle {
             loc: 0,
             orig: NO_ORIG,
         };
-        if self.m(t).item != 0 && d.it(self.m(t).item) == crate::kinds::It::QuickClaw && self.rng.chance(1, 5) {
-            a.frac = 1;
-            blog!(self, "|-activate|{}|item: Quick Claw", self.name(t));
-        }
+        a.frac = self.fractional_priority(t, move_id);
         let mut loc = last_loc;
         if loc == 0 {
             let tt = self.action_target_type(t, move_id);

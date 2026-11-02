@@ -59,6 +59,8 @@ pub struct Vol {
     /// the action is queued; duration 1): only a -prepare message, but it joins the Residual
     /// sort when the user is still on the field at the end of the turn.
     pub chilly_reception: bool,
+    /// Showdown's fling volatile: the flung item is used up at the Update after the move.
+    pub fling: bool,
     /// Showdown's lockedmove volatile (Outrage, Thrash, Petal Dance): the locked move slot + 1,
     /// the remaining duration (2, refreshed by each hit while true turns remain) and the true
     /// duration drawn at the start (2 or 3); fatigue confusion when it ends with none left.

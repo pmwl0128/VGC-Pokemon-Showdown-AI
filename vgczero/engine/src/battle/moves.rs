@@ -132,6 +132,10 @@ impl Battle {
         if self.is_live(p) && self.m(p).vol.locked_dur == 1 {
             self.end_locked_move(p);
         }
+        // fling's onUpdate: the flung item is used up after the move.
+        if self.is_live(p) && self.m(p).vol.fling {
+            self.fling_consume(p);
+        }
         if self.dex.mv(move_id).fx == MoveFx::Round {
             self.round_used = true;
             // The next queued Round (either side) moves next.
@@ -424,6 +428,12 @@ impl Battle {
             blog!(self, "|-fail|{}", self.name(p));
             self.after_move_fail(p, am);
             return false;
+        }
+        // Pinned fling.onPrepareHit: the item's fling base power; the fling volatile makes the
+        // Update after the move use the item up, whether or not the move then connects.
+        if am.fx == MoveFx::Fling {
+            am.base_power = self.dex.item(self.m(p).item).fling_bp;
+            self.mm(p).vol.fling = true;
         }
         self.protean(p, am);
         let ok = self.try_spread_move_hit(p, am, &targets[..n]);
@@ -772,6 +782,8 @@ impl Battle {
             MoveFx::NoRetreat => !self.m(p).vol.no_retreat,
             MoveFx::Stockpile => self.m(p).vol.stockpile < 3,
             MoveFx::DestinyBond => !(self.m(p).vol.last_move_slot == am.mslot && self.m(p).vol.destiny_bond),
+            // Pinned fling.onPrepareHit: a held item with fling data, else the move fails.
+            MoveFx::Fling => self.m(p).item != 0 && self.dex.item(self.m(p).item).fling_bp > 0,
             MoveFx::AllySwitch => self.ally_switch_prepare(p),
             _ => true,
         }
@@ -883,6 +895,17 @@ impl Battle {
             let v = &mut self.mm(t).vol;
             v.attract = false;
             v.taunt = 0;
+        }
+    }
+
+    /// Pinned fling.condition.onUpdate: the flung item leaves as used (lastItem, -enditem,
+    /// AfterUseItem for Unburden) and the volatile ends.
+    pub(crate) fn fling_consume(&mut self, p: Pos) {
+        self.mm(p).vol.fling = false;
+        if self.m(p).item != 0 {
+            let name = self.dex.item(self.m(p).item).name.clone();
+            blog!(self, "|-enditem|{}|{}|[from] move: Fling", self.name(p), name);
+            self.remove_item(p);
         }
     }
 
@@ -2500,6 +2523,22 @@ impl Battle {
         let mv = self.dex.mv(am.id);
         // Sheer Force deletes the move's secondaries; King's Rock (onModifyMove, priority -1,
         // after it) then appends a 10% flinch unless one is left.
+        // Pinned fling: PrepareHit gives the move one secondary from the item's fling data,
+        // applied without a roll (no chance). King's Rock's own onModifyMove saw no secondaries
+        // then and Sheer Force's deletion came earlier, so neither applies.
+        if am.fx == MoveFx::Fling {
+            let item = self.dex.item(self.m(p).item);
+            let (st, vk) = (item.fling_status, item.fling_volatile);
+            if sub_hit || !self.is_live(t) || self.tab(t) == Ab::ShieldDust {
+                return;
+            }
+            if st != Status::None {
+                self.try_set_status(t, st, Some(p));
+            } else if let Some(v) = vk {
+                self.add_volatile(t, v, Some(p));
+            }
+            return;
+        }
         let own: &[_] = if am.sheer_force { &[] } else { &mv.secondaries };
         let kings_rock = self.it(p) == It::KingsRock && !own.iter().any(|s| s.volatile == Some(VolKind::Flinch));
         if own.is_empty() && !kings_rock {
@@ -3325,6 +3364,52 @@ mod tests {
         b.mm(t).status = Status::Par;
         b.replace_ability(t, dex().ability_id("limber").unwrap());
         assert_eq!(b.m(t).status, Status::None, "Limber's Update cured the paralysis");
+    }
+
+    /// Pinned fling: PrepareHit needs a held item with fling data (King's Rock: 30 power, a
+    /// flinch with no chance); the Update after the move uses the item up, which Unburden sees.
+    #[test]
+    fn fling_needs_a_flingable_item_and_uses_it_up() {
+        setup();
+        let user = team(vec![json!({"species": "sneasler", "ability": "unburden", "item": "kingsrock",
+                                    "moves": ["fling", "protect"], "stats": [195, 182, 100, 70, 90, 172],
+                                    "types": ["Fighting", "Poison"], "weightkg": 43.0, "level": 50})]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 21);
+        let p = Pos::new(0, 0);
+        let am = b.make_active_move(p, dex().move_id("fling").unwrap(), 0, false);
+        assert!(b.move_try(p, &am, &[Pos::new(1, 0)]));
+        let item = dex().item(b.m(p).item);
+        assert_eq!((item.fling_bp, item.fling_status, item.fling_volatile), (30, Status::None, Some(VolKind::Flinch)));
+        b.mm(p).vol.fling = true;
+        b.fling_consume(p);
+        assert_eq!(b.m(p).item, 0);
+        assert_eq!(b.m(p).last_item, dex().item_id("kingsrock").unwrap());
+        assert!(b.m(p).vol.unburden, "AfterUseItem: Unburden");
+        assert!(!b.m(p).vol.fling);
+        assert!(!b.move_try(p, &am, &[Pos::new(1, 0)]), "nothing left to fling");
+    }
+
+    /// Pinned quickdraw (FractionalPriority -1, 3/10 on a damaging move) runs before Quick Claw
+    /// (-2, 1/5, only while the fraction is still 0): a holder with both moves first about
+    /// 1 - 0.7 * 0.8 = 44% of the time with an attack, 20% with a status move.
+    #[test]
+    fn quick_draw_rolls_before_quick_claw() {
+        setup();
+        let user = team(vec![json!({"species": "slowbro", "ability": "quickdraw", "item": "quickclaw",
+                                    "moves": ["surf", "protect"], "stats": [202, 95, 130, 120, 100, 50],
+                                    "types": ["Water", "Psychic"], "weightkg": 78.5, "level": 50})]);
+        let foe = team(vec![]);
+        let mut hits = [0u32; 2];
+        let n = 300u64;
+        for seed in 0..n {
+            let mut b = fielded(&user, &foe, seed);
+            let p = Pos::new(0, 0);
+            hits[0] += b.fractional_priority(p, dex().move_id("surf").unwrap()) as u32;
+            hits[1] += b.fractional_priority(p, dex().move_id("protect").unwrap()) as u32;
+        }
+        assert!((105..=160).contains(&hits[0]), "attack: {} of {n}", hits[0]);
+        assert!((38..=85).contains(&hits[1]), "status move: {} of {n}", hits[1]);
     }
 
     /// Pinned Rest.onHit overwrites what slp.onStart drew (data/moves.ts:14979-14982): the draw
