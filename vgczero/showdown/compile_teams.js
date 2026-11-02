@@ -14,6 +14,9 @@
 
 const fs = require('fs');
 const path = require('path');
+// Names in the output use the file's base name with forward slashes, so the decompressed JSON is
+// identical across platforms (the gzip header still carries the platform's OS byte).
+const baseName = file => path.posix.basename(file.split(String.fromCharCode(92)).join('/'));
 
 const { PS_DIR, FORMAT, TEAMS_FILE } = require('./pinned');
 
@@ -97,16 +100,16 @@ for (const dir of dirs) {
 		files++;
 		const { file, team } = source;
 		if (source.error) {
-			rejected.push({ file: path.basename(file), name: source.name, errors: [source.error] });
+			rejected.push({ file: baseName(file), name: source.name, errors: [source.error] });
 			continue;
 		}
 		if (!team || team.length !== 6) {
-			rejected.push({ file: path.basename(file), name: source.name, errors: [`team size ${team ? team.length : 0}`] });
+			rejected.push({ file: baseName(file), name: source.name, errors: [`team size ${team ? team.length : 0}`] });
 			continue;
 		}
 		const errors = validator.validateTeam(team);
 		if (errors) {
-			rejected.push({ file: path.basename(file), name: source.name, errors });
+			rejected.push({ file: baseName(file), name: source.name, errors });
 			continue;
 		}
 		const mons = team.map(compileSet);
@@ -116,7 +119,7 @@ for (const dir of dirs) {
 			continue;
 		}
 		const entry = {
-			name: source.name, source: path.basename(file), duplicates: [], mons,
+			name: source.name, source: baseName(file), duplicates: [], mons,
 			// Showdown export text, so the live client can submit the team.
 			export: Teams.export(team),
 			packed: Teams.pack(team),
@@ -128,7 +131,7 @@ for (const dir of dirs) {
 
 const out = {
 	// Input file names only (here and per team), so the pool is byte-reproducible wherever the inputs live.
-	meta: { format: FORMAT, sources: dirs.map(d => path.basename(d)), files, compiled: teams.length, rejected: rejected.length },
+	meta: { format: FORMAT, sources: dirs.map(d => baseName(d)), files, compiled: teams.length, rejected: rejected.length },
 	teams,
 	rejected,
 };

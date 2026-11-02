@@ -88,6 +88,8 @@ impl Battle {
 
         if let Err(counts_as_fail) = self.before_move(p, move_id) {
             self.mm(p).vol.this_move_failed = counts_as_fail;
+            // MoveAborted: Destiny Bond ends (pinned destinybond.onMoveAborted).
+            self.mm(p).vol.destiny_bond = false;
             self.mm(p).vol.charging = 0;
             self.mm(p).vol.semi_inv = SemiInv::None;
             // MoveAborted: Charge ends when the aborted move is Electric.
@@ -95,6 +97,11 @@ impl Battle {
             return;
         }
 
+        // destinybond.onBeforeMove (priority -1, so after every other BeforeMove check passed):
+        // the bond ends before any move other than Destiny Bond itself executes.
+        if d.mv(move_id).fx != MoveFx::DestinyBond {
+            self.mm(p).vol.destiny_bond = false;
+        }
         // beforeMoveCallback (Focus Punch): after the BeforeMove event, before any PP, a
         // focusing user that was hit loses the move; moveThisTurnResult is false.
         if d.mv(move_id).fx == MoveFx::FocusPunch && self.m(p).vol.focus_punch == 2 {
