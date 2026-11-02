@@ -115,7 +115,7 @@ impl Battle {
             let pick = self.illusion_target(p.s(), p.i());
             self.mm(p).vol.illusion_species = pick;
         }
-        blog!(self, "|switch|{}|{}/{}", self.name(p), self.m(p).hp, self.m(p).max_hp);
+        blog!(self, "|switch|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
     }
 
     /// Pinned `Battle.swapPosition` (sim/battle.ts:1592) as Ally Switch uses it: the user and

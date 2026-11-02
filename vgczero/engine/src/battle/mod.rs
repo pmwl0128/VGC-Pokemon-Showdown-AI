@@ -563,11 +563,10 @@ impl Battle {
         }
         blog!(
             self,
-            "|-heal|p{}: {}|{}/{}|[from] move: Revival Blessing",
+            "|-heal|p{}: {}|{}|[from] move: Revival Blessing",
             s + 1,
-            self.mon_name(s, to),
-            self.sides[s].mons[to].hp,
-            self.sides[s].mons[to].max_hp
+            self.dex.sp(self.sides[s].mons[to].species).base_species,
+            Self::hp_text_mon(&self.sides[s].mons[to])
         );
         for slot in 0..2 {
             if self.sides[s].active[slot] as usize == to {
@@ -1099,8 +1098,41 @@ impl Battle {
             "p{}{}: {}",
             p.side + 1,
             if p.slot == 0 { 'a' } else { 'b' },
-            self.dex.sp(self.sides[p.s()].mons[i as usize].species).name
+            // Pinned Pokemon(): without a nickname, `set.name` is the base species name.
+            self.dex.sp(self.sides[p.s()].mons[i as usize].species).base_species
         )
+    }
+
+    /// Pinned `getHealth().secret`: `hp/maxhp`, a status suffix, `0 fnt` when fainted.
+    pub fn hp_text_mon(m: &crate::state::Mon) -> String {
+        if m.hp == 0 {
+            return "0 fnt".to_string();
+        }
+        let st = m.status.id();
+        if st.is_empty() {
+            format!("{}/{}", m.hp, m.max_hp)
+        } else {
+            format!("{}/{} {}", m.hp, m.max_hp, st)
+        }
+    }
+
+    pub fn hp_text(&self, p: Pos) -> String {
+        Self::hp_text_mon(self.m(p))
+    }
+
+    /// Pinned `getUpdatedDetails`: species name, `, L<level>` unless 100, `, M`/`, F`.
+    pub fn details(&self, p: Pos) -> String {
+        let m = self.m(p);
+        let mut s = self.dex.sp(m.species).name.clone();
+        if m.level != 100 {
+            s.push_str(&format!(", L{}", m.level));
+        }
+        match m.gender {
+            1 => s.push_str(", M"),
+            2 => s.push_str(", F"),
+            _ => {}
+        }
+        s
     }
 
     pub fn mon_name(&self, side: usize, i: usize) -> &'static str {

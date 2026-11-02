@@ -676,7 +676,7 @@ impl Battle {
             m.vol.hurt_this_turn = true;
         }
         let hp = m.hp;
-        blog!(self, "|-damage|{}|{}/{}", self.name(tgt), hp, self.m(tgt).max_hp);
+        blog!(self, "|-damage|{}|{}", self.name(tgt), self.hp_text(tgt));
         if hp == 0 {
             self.queue_faint(tgt);
         }
@@ -696,7 +696,7 @@ impl Battle {
         let h = amount.min(room);
         m.hp += h as u16;
         if h > 0 {
-            blog!(self, "|-heal|{}|{}/{}", self.name(tgt), self.m(tgt).hp, self.m(tgt).max_hp);
+            blog!(self, "|-heal|{}|{}", self.name(tgt), self.hp_text(tgt));
         }
         h
     }
@@ -1061,7 +1061,16 @@ impl Battle {
             m.speed = m.stats[5] as i32;
         }
         self.sides[p.s()].mega_used = true;
-        blog!(self, "|-mega|{}", self.name(p));
+        // Pinned formeChange(isPermanent): `detailschange`, then `-mega` with the new
+        // species' base name and its required item.
+        blog!(self, "|detailschange|{}|{}", self.name(p), self.details(p));
+        blog!(
+            self,
+            "|-mega|{}|{}|{}",
+            self.name(p),
+            self.dex.sp(self.m(p).species).base_species,
+            self.dex.item(self.m(p).item).name
+        );
         // The new ability starts immediately.
         self.ability_start(p);
         self.white_herb_event(p, false);

@@ -249,7 +249,7 @@ impl Battle {
                 for s in 0..2 {
                     for slot in 0..2 {
                         let p = Pos::new(s, slot);
-                        blog!(self, "|switch|{}|{}/{}", self.name(p), self.m(p).hp, self.m(p).max_hp);
+                        blog!(self, "|switch|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
                         self.insert_run_switch(p);
                     }
                 }
@@ -311,6 +311,10 @@ impl Battle {
                 }
                 residual_hp = Some((hp, n));
                 self.run_residual();
+                // Pinned runAction "residual": `upkeep` unless the battle ended.
+                if !self.ended() {
+                    blog!(self, "|upkeep");
+                }
             }
         }
         if self.ended() {

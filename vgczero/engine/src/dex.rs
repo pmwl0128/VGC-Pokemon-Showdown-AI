@@ -204,6 +204,19 @@ impl Status {
             _ => Status::None,
         }
     }
+
+    /// Showdown's status id as it appears in protocol lines (empty for none).
+    pub fn id(self) -> &'static str {
+        match self {
+            Status::None => "",
+            Status::Brn => "brn",
+            Status::Par => "par",
+            Status::Slp => "slp",
+            Status::Frz => "frz",
+            Status::Psn => "psn",
+            Status::Tox => "tox",
+        }
+    }
 }
 
 /// Volatile statuses a move (or secondary) can inflict, by name.
