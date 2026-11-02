@@ -1253,7 +1253,8 @@ impl Battle {
                 return Hit::NotFail;
             }
         }
-        if conds.quick_guard && am.priority > 0 && am.flags & flag::PROTECT != 0 && foe {
+        // Pinned quickguard.onTryHit has no side check: an ally's priority move is blocked too.
+        if conds.quick_guard && am.priority > 0 && am.flags & flag::PROTECT != 0 {
             if mv.fx != MoveFx::Feint {
                 blog!(self, "|-activate|{}|move: Quick Guard", self.name(t));
                 return Hit::NotFail;

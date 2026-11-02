@@ -733,6 +733,13 @@ impl Battle {
                             a.priority = 0;
                         }
                         // resolveAction: FractionalPriority (Quick Draw, Quick Claw) first, then the target.
+                        // A move with a priorityChargeCallback (Focus Punch) also resolves a
+                        // priorityChargeMove copy (battle-queue.ts resolveAction) that carries no
+                        // targetLoc: its getRandomTarget draws before this action's
+                        // FractionalPriority. A field target (Chilly Reception) draws nothing.
+                        if mv.fx == crate::kinds::MoveFx::FocusPunch {
+                            let _ = self.get_random_target(p, mv.target);
+                        }
                         a.frac = self.fractional_priority(p, mid);
                         if recharge {
                             // The locked 'recharge' move keeps lastMoveTargetLoc (no resolution
@@ -893,6 +900,10 @@ impl Battle {
             loc: 0,
             orig: NO_ORIG,
         };
+        if d.mv(move_id).fx == crate::kinds::MoveFx::FocusPunch {
+            let tt = d.mv(move_id).target;
+            let _ = self.get_random_target(p, tt);
+        }
         a.frac = self.fractional_priority(p, move_id);
         let (loc, orig) = self.resolve_target(p, move_id, Some(TARGET_RANDOM));
         a.loc = loc;

@@ -1091,9 +1091,12 @@ impl Battle {
         if t.vol.glaive_rush > 0 {
             h.add(0, sd, SUB_COND, fm(2, 1), d.cr(Cond::GlaiveRush));
         }
-        // Minimize's onSourceModifyDamage: minimize-flagged moves deal double damage.
-        if t.vol.minimize && am.flags & flag::MINIMIZE != 0 {
-            h.add(0, sd, SUB_COND, fm(2, 1), d.cr(Cond::Minimize));
+        // Minimize's onSourceModifyDamage joins the chain whenever the volatile is up (the
+        // handler decides: double damage only for minimize-flagged moves); leaving it out
+        // shifts the chain's tie groups (b18 x3.167.*).
+        if t.vol.minimize {
+            let m = if am.flags & flag::MINIMIZE != 0 { fm(2, 1) } else { NO_MOD };
+            h.add(0, sd, SUB_COND, m, d.cr(Cond::Minimize));
         }
         let mid = d.mv(am.id).id.as_str();
         match t.vol.semi_inv {
