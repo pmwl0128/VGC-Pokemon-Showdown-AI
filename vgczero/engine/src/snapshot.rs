@@ -503,6 +503,10 @@ impl Battle {
                     v.stall_counter = i(st, "counter") as u16;
                     v.stall_dur = dur;
                 }
+                "allyswitch" => {
+                    v.ally_switch_counter = i(st, "counter") as u16;
+                    v.ally_switch_dur = dur;
+                }
                 "helpinghand" => {
                     let mult = f(st, "multiplier").max(1.0);
                     v.helping_hand = (mult.ln() / 1.5f64.ln()).round() as u8;
@@ -808,6 +812,9 @@ impl Battle {
         }
         if v.stall_dur > 0 {
             push(format!("stall={}/{}", v.stall_counter, v.stall_dur));
+        }
+        if v.ally_switch_dur > 0 {
+            push(format!("allyswitch={}/{}", v.ally_switch_counter, v.ally_switch_dur));
         }
         if v.must_recharge {
             push("mustrecharge=y".into());

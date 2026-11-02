@@ -45,6 +45,7 @@ enum Res {
     Protect,
     Endure,
     Stall,
+    AllySwitch,
     HelpingHand,
     FollowMe,
     TwoTurnMove,
@@ -312,6 +313,9 @@ impl Battle {
                 if w.stall_dur > 0 {
                     v.push(mon(LAST, 2, Cond::Stall, Res::Stall));
                 }
+                if w.ally_switch_dur > 0 {
+                    v.push(mon(LAST, 2, Cond::AllySwitch, Res::AllySwitch));
+                }
                 if w.helping_hand > 0 {
                     v.push(mon(LAST, 2, Cond::HelpingHand, Res::HelpingHand));
                 }
@@ -486,6 +490,7 @@ impl Battle {
                 match h.kind {
                     Res::Flinch | Res::Protect | Res::Endure | Res::HelpingHand | Res::FollowMe | Res::Roost | Res::TwoTurnSpent => true,
                     Res::Stall => v.stall_dur == 1,
+                    Res::AllySwitch => v.ally_switch_dur == 1,
                     Res::Taunt => v.taunt == 1,
                     Res::Encore => v.encore == 1,
                     Res::Disable => v.disable == 1,
@@ -665,6 +670,13 @@ impl Battle {
                 v.stall_dur -= 1;
                 if v.stall_dur == 0 {
                     v.stall_counter = 0;
+                }
+            }
+            Res::AllySwitch => {
+                let v = &mut self.mm(p).vol;
+                v.ally_switch_dur -= 1;
+                if v.ally_switch_dur == 0 {
+                    v.ally_switch_counter = 0;
                 }
             }
             // twoturnmove / mustrecharge count down; the move action ends them.

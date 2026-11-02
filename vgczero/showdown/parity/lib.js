@@ -358,6 +358,7 @@ const TRACKED_VOLATILES = {
 	smackdown: s => 'y',
 	choicelock: s => s.move,
 	stall: s => `${s.counter}/${s.duration}`,
+	allyswitch: s => `${s.counter}/${s.duration}`,
 	mustrecharge: s => 'y',
 	twoturnmove: s => s.move,
 	glaiverush: s => 'y',

@@ -146,6 +146,11 @@ impl Queue {
     pub fn iter(&self) -> impl Iterator<Item = &Action> {
         self.list[..self.len].iter().filter_map(|x| x.as_ref())
     }
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(&mut Action)) {
+        for a in self.list[..self.len].iter_mut().flatten() {
+            f(a);
+        }
+    }
     pub fn pop_front(&mut self) -> Option<Action> {
         if self.len == 0 {
             return None;

@@ -585,6 +585,7 @@ macro_rules! conds {
     };
 }
 conds! {
+    AllySwitch = "allyswitch",
     AquaRing = "aquaring",
     AuroraVeil = "auroraveil",
     BanefulBunker = "banefulbunker",

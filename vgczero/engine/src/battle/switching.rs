@@ -118,6 +118,79 @@ impl Battle {
         blog!(self, "|switch|{}|{}/{}", self.name(p), self.m(p).hp, self.m(p).max_hp);
     }
 
+    /// Pinned `Battle.swapPosition` (sim/battle.ts:1592) as Ally Switch uses it: the user and
+    /// the other active Pokemon of its side trade slots. `active`, `Mon.slot` and the party order
+    /// (`side.pokemon`) follow; the queued actions of both follow their Pokemon (Showdown's queue
+    /// holds the objects). References the engine keeps as position codes are re-coded where
+    /// pinned keeps the object (Attract and Partially Trapped: `effectState.source`) and left
+    /// alone where pinned keeps the slot (Leech Seed `sourceSlot`, `attackedBy.slot`, the Wish
+    /// and Healing Wish slot conditions: all resolve through getAtSlot). The two `Swap` events
+    /// then settle Healing Wish for the new occupant of each slot, the displaced Pokemon first.
+    pub fn swap_position(&mut self, p: Pos) -> bool {
+        let s = p.s();
+        let q = p.ally();
+        let a = self.sides[s].active[p.i()];
+        let b = self.sides[s].active[q.i()];
+        if a == crate::state::NO_MON || b == crate::state::NO_MON || self.sides[s].mons[b as usize].fainted {
+            return false;
+        }
+        blog!(self, "|swap|{}|{}|[from] move: Ally Switch", self.name(p), q.i());
+        self.sides[s].active.swap(0, 1);
+        self.sides[s].mons[a as usize].slot = q.slot as i8;
+        self.sides[s].mons[b as usize].slot = p.slot as i8;
+        self.sides[s].swap_order(a, b);
+        let (ca, cb) = (p.code(), q.code());
+        for c in 0..4u8 {
+            let r = Pos::from_code(c);
+            let i = self.sides[r.s()].active[r.i()];
+            if i == crate::state::NO_MON {
+                continue;
+            }
+            let v = &mut self.sides[r.s()].mons[i as usize].vol;
+            if v.attract {
+                if v.attract_src == ca && v.attract_mon == a {
+                    v.attract_src = cb;
+                } else if v.attract_src == cb && v.attract_mon == b {
+                    v.attract_src = ca;
+                }
+            }
+            if v.partial_trap > 0 {
+                if v.partial_trap_src == ca && v.partial_trap_mon == a {
+                    v.partial_trap_src = cb;
+                } else if v.partial_trap_src == cb && v.partial_trap_mon == b {
+                    v.partial_trap_src = ca;
+                }
+            }
+        }
+        self.queue.for_each_mut(|act| {
+            if act.pos.s() == s {
+                if act.mon == a {
+                    act.pos = q;
+                } else if act.mon == b {
+                    act.pos = p;
+                }
+            }
+        });
+        // runEvent('Swap', target, pokemon), then runEvent('Swap', pokemon, target).
+        self.slot_condition_swap(p);
+        self.slot_condition_swap(q);
+        true
+    }
+
+    /// Healing Wish's slot condition on a `Swap` event (pinned healingwish.condition.onSwap): the
+    /// Pokemon now in the slot is healed and cured when it needs either. Wish has no onSwap.
+    fn slot_condition_swap(&mut self, q: Pos) {
+        if self.sides[q.s()].healing_wish[q.i()] && self.is_live(q) {
+            let m = self.m(q);
+            if m.hp < m.max_hp || m.status != Status::None {
+                self.sides[q.s()].healing_wish[q.i()] = false;
+                let mh = self.m(q).max_hp as u32;
+                self.heal(q, mh);
+                self.cure_status(q);
+            }
+        }
+    }
+
     /// Pinned illusion's onBeforeSwitchIn: scan the party order from the end down to
     /// `slot + 1` and take the first unfainted member (0 when there is none). Only brought
     /// members are candidates: pinned scans `side.pokemon`, which holds the four brought ones,

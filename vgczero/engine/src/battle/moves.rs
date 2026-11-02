@@ -42,6 +42,7 @@ impl Battle {
             return;
         }
         let d = self.dex;
+        let user = self.sides[p.s()].active[p.i()];
         {
             let m = self.mm(p);
             m.vol.move_actions = m.vol.move_actions.saturating_add(1);
@@ -117,6 +118,8 @@ impl Battle {
             }
         }
         let (ok, ty) = self.use_move(p, move_id, mslot, target, loc, struggle);
+        // Ally Switch moved the user mid-action: what follows is about the Pokemon.
+        let p = self.user_pos(p, user);
         if self.is_live(p) {
             self.mm(p).vol.this_move_failed = !ok;
         }
@@ -763,7 +766,45 @@ impl Battle {
             MoveFx::NoRetreat => !self.m(p).vol.no_retreat,
             MoveFx::Stockpile => self.m(p).vol.stockpile < 3,
             MoveFx::DestinyBond => !(self.m(p).vol.last_move_slot == am.mslot && self.m(p).vol.destiny_bond),
+            MoveFx::AllySwitch => self.ally_switch_prepare(p),
             _ => true,
+        }
+    }
+
+    /// Pinned allyswitch.onPrepareHit: `addVolatile('allyswitch')`. A fresh volatile starts at
+    /// counter 3 with duration 2 and draws nothing; one still running takes the condition's
+    /// Restart path: roll 1/counter, and on a miss drop the volatile and fail the move (the PP
+    /// is already paid), else triple the counter (729 at most) and refresh the duration.
+    fn ally_switch_prepare(&mut self, p: Pos) -> bool {
+        let (counter, dur) = {
+            let v = &self.m(p).vol;
+            (v.ally_switch_counter, v.ally_switch_dur)
+        };
+        if dur > 0 {
+            if !self.rng.chance(1, counter.max(1) as u32) {
+                let v = &mut self.mm(p).vol;
+                v.ally_switch_counter = 0;
+                v.ally_switch_dur = 0;
+                return false;
+            }
+            let v = &mut self.mm(p).vol;
+            v.ally_switch_counter = (counter * 3).min(729);
+            v.ally_switch_dur = 2;
+        } else {
+            let v = &mut self.mm(p).vol;
+            v.ally_switch_counter = 3;
+            v.ally_switch_dur = 2;
+        }
+        true
+    }
+
+    /// Where the Pokemon `user` (a team index) that acted from `p` is now: Ally Switch moves the
+    /// user mid-action, and Showdown's bookkeeping after the move follows the object.
+    fn user_pos(&self, p: Pos, user: u8) -> Pos {
+        if self.sides[p.s()].active[p.i()] != user && self.sides[p.s()].active[p.ally().i()] == user {
+            p.ally()
+        } else {
+            p
         }
     }
 
@@ -1826,6 +1867,18 @@ impl Battle {
                 }
                 return false;
             }
+            // Pinned allyswitch.onHit: with no live Pokemon in the other slot the move fails
+            // without failing (`-fail`, then NOT_FAIL); otherwise swapPosition.
+            MoveFx::AllySwitch => {
+                let q = p.ally();
+                let other = self.sides[q.s()].active[q.i()];
+                if other == crate::state::NO_MON || self.sides[q.s()].mons[other as usize].fainted {
+                    blog!(self, "|-fail|{}|move: Ally Switch", self.name(p));
+                    return true;
+                }
+                self.swap_position(p);
+                return true;
+            }
             MoveFx::FollowMe => {
                 self.mm(p).vol.follow_me = 1;
                 return true;
@@ -2799,6 +2852,183 @@ mod tests {
             b.sides[s].mons[0].slot = 0;
         }
         b
+    }
+
+    /// A doubles battle in the move phase: mons 0 and 1 of each side on the field.
+    fn fielded2(side0: &TeamSpec, side1: &TeamSpec, seed: u64) -> Battle {
+        let mut b = Battle::new([side0, side1], seed, BattleConfig::default());
+        b.phase = Phase::Move;
+        for s in 0..2 {
+            b.sides[s].active = [0, 1];
+            for i in 0..2 {
+                b.sides[s].mons[i].brought = true;
+                b.sides[s].mons[i].slot = i as i8;
+            }
+        }
+        b
+    }
+
+    fn ally_switch_user() -> TeamSpec {
+        team(vec![
+            json!({"species": "farigiraf", "ability": "armortail", "item": "",
+                   "moves": ["allyswitch", "tackle"], "stats": [220, 110, 90, 130, 90, 80],
+                   "types": ["Normal", "Psychic"], "weightkg": 160.0, "level": 50}),
+            filler(),
+        ])
+    }
+
+    /// Pinned allyswitch.onHit -> Battle.swapPosition: the two actives trade `active` entries,
+    /// `Mon.slot` and party order; a queued action of the ally follows it to its new slot; the
+    /// first use starts the volatile (counter 3, duration 2) without a roll.
+    #[test]
+    fn ally_switch_swaps_slots_party_order_and_queued_actions() {
+        setup();
+        let user = ally_switch_user();
+        let foe = team(vec![]);
+        let mut b = fielded2(&user, &foe, 7);
+        let p = Pos::new(0, 0);
+        let q = Pos::new(0, 1);
+        b.queue.push(crate::battle::Action {
+            kind: ActionKind::Move { mslot: 0, target: 0, recharge: false },
+            pos: q,
+            mon: 1,
+            order: 200,
+            priority: 0,
+            frac: 0,
+            speed: 30,
+            move_id: b.sides[0].mons[1].moves[0],
+            loc: 0,
+            orig: 0,
+        });
+        let order0 = b.sides[0].order;
+        let rng0 = b.rng;
+        let am = b.make_active_move(p, dex().move_id("allyswitch").unwrap(), 0, false);
+        assert!(b.move_try(p, &am, &[p]), "a fresh volatile starts without a roll");
+        assert_eq!(b.rng, rng0);
+        assert!(b.status_move_effects(p, p, &am));
+        assert_eq!(b.sides[0].active, [1, 0]);
+        assert_eq!(b.sides[0].mons[0].slot, 1);
+        assert_eq!(b.sides[0].mons[1].slot, 0);
+        assert_eq!(b.sides[0].order[0], order0[1]);
+        assert_eq!(b.sides[0].order[1], order0[0]);
+        assert_eq!(b.queue.will_move(p).map(|a| a.mon), Some(1), "the ally's action follows it to slot 0");
+        assert!(b.queue.will_move(q).is_none());
+        let v = b.sides[0].mons[0].vol;
+        assert_eq!((v.ally_switch_counter, v.ally_switch_dur), (3, 2));
+        assert_eq!(b.user_pos(p, 0), q, "the bookkeeping after the move follows the user");
+    }
+
+    /// Pinned allyswitch.condition.onRestart: a repeat while the volatile lasts rolls 1/counter;
+    /// a miss drops the volatile and fails the move, a hit triples the counter and refreshes it.
+    #[test]
+    fn ally_switch_repeat_rolls_one_in_counter() {
+        setup();
+        let user = ally_switch_user();
+        let foe = team(vec![]);
+        let n = 90u64;
+        let mut ok = 0;
+        for seed in 0..n {
+            let mut b = fielded2(&user, &foe, seed);
+            let p = Pos::new(0, 0);
+            let am = b.make_active_move(p, dex().move_id("allyswitch").unwrap(), 0, false);
+            assert!(b.move_try(p, &am, &[p]));
+            assert!(b.status_move_effects(p, p, &am));
+            let p2 = Pos::new(0, 1);
+            let am2 = b.make_active_move(p2, dex().move_id("allyswitch").unwrap(), 0, false);
+            let rng0 = b.rng;
+            let again = b.move_try(p2, &am2, &[p2]);
+            assert_ne!(b.rng, rng0, "seed {seed}: a repeat rolls");
+            let v = b.sides[0].mons[0].vol;
+            if again {
+                ok += 1;
+                assert_eq!((v.ally_switch_counter, v.ally_switch_dur), (9, 2), "seed {seed}");
+            } else {
+                assert_eq!((v.ally_switch_counter, v.ally_switch_dur), (0, 0), "seed {seed}");
+            }
+        }
+        assert!((15..=45).contains(&ok), "about one repeat in three succeeds, got {ok}/{n}");
+    }
+
+    /// Pinned allyswitch.onHit with no live Pokemon in the other slot: `-fail`, NOT_FAIL (the
+    /// move did not fail), nothing moves, nothing is drawn.
+    #[test]
+    fn ally_switch_fails_quietly_without_a_live_ally() {
+        setup();
+        let user = ally_switch_user();
+        let foe = team(vec![]);
+        for fainted_ally in [false, true] {
+            let mut b = fielded2(&user, &foe, 3);
+            if fainted_ally {
+                b.sides[0].mons[1].fainted = true;
+                b.sides[0].mons[1].hp = 0;
+            } else {
+                b.sides[0].active = [0, NO_MON];
+            }
+            let p = Pos::new(0, 0);
+            let am = b.make_active_move(p, dex().move_id("allyswitch").unwrap(), 0, false);
+            assert!(b.move_try(p, &am, &[p]));
+            let active0 = b.sides[0].active;
+            let rng0 = b.rng;
+            assert!(b.status_move_effects(p, p, &am), "NOT_FAIL: the move did not fail");
+            assert_eq!(b.sides[0].active, active0);
+            assert_eq!(b.sides[0].mons[0].slot, 0);
+            assert_eq!(b.rng, rng0);
+        }
+    }
+
+    /// Pinned healingwish.condition.onSwap: the Pokemon that swaps into a slot holding Healing
+    /// Wish is healed there and then, and the slot condition is consumed.
+    #[test]
+    fn ally_switch_settles_healing_wish_for_the_new_occupant() {
+        setup();
+        let user = ally_switch_user();
+        let foe = team(vec![]);
+        let mut b = fielded2(&user, &foe, 5);
+        let p = Pos::new(0, 0);
+        b.sides[0].healing_wish[1] = true;
+        b.mm(p).hp = 50;
+        let am = b.make_active_move(p, dex().move_id("allyswitch").unwrap(), 0, false);
+        assert!(b.move_try(p, &am, &[p]));
+        assert!(b.status_move_effects(p, p, &am));
+        assert_eq!(b.sides[0].mons[0].slot, 1);
+        assert_eq!(b.sides[0].mons[0].hp, b.sides[0].mons[0].max_hp);
+        assert!(!b.sides[0].healing_wish[1]);
+    }
+
+    /// Showdown keeps Attract's and Partially Trapped's source as the Pokemon, Leech Seed's and
+    /// attackedBy's as the slot: after the swap the former are re-coded to the user's new
+    /// position and the latter still name the slot.
+    #[test]
+    fn ally_switch_recodes_object_references_only() {
+        setup();
+        let user = ally_switch_user();
+        let foe = team(vec![]);
+        let mut b = fielded2(&user, &foe, 9);
+        let p = Pos::new(0, 0);
+        let q = Pos::new(0, 1);
+        let f = Pos::new(1, 0);
+        {
+            let v = &mut b.mm(f).vol;
+            v.attract = true;
+            v.attract_src = p.code();
+            v.attract_mon = 0;
+            v.partial_trap = 3;
+            v.partial_trap_src = p.code();
+            v.partial_trap_mon = 0;
+            v.leech_seed = true;
+            v.leech_seed_src = p.code();
+            v.last_damage_taken = 10;
+            v.last_damage_src = p.code();
+        }
+        let am = b.make_active_move(p, dex().move_id("allyswitch").unwrap(), 0, false);
+        assert!(b.move_try(p, &am, &[p]));
+        assert!(b.status_move_effects(p, p, &am));
+        let v = b.m(f).vol;
+        assert_eq!(v.attract_src, q.code());
+        assert_eq!(v.partial_trap_src, q.code());
+        assert!(b.partial_trapper_active(f), "the trapper is still on the field, in its new slot");
+        assert_eq!(v.leech_seed_src, p.code());
+        assert_eq!(v.last_damage_src, p.code());
     }
 
     /// Pinned Rest.onHit overwrites what slp.onStart drew (data/moves.ts:14979-14982): the draw

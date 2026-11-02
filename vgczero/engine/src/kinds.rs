@@ -319,6 +319,7 @@ tag_enum!(MoveFx {
     HelpingHand = "helpinghand",
     FollowMe = "followme",
     RagePowder = "ragepowder",
+    AllySwitch = "allyswitch",
     ExpandingForce = "expandingforce",
     WeatherBall = "weatherball",
     TerrainPulse = "terrainpulse",

@@ -51,6 +51,10 @@ pub struct Vol {
     /// Showdown's 'stall' volatile: counter (3, 9, ... 729) and remaining duration.
     pub stall_counter: u16,
     pub stall_dur: u8,
+    /// Showdown's 'allyswitch' volatile (pinned data/moves.ts allyswitch.condition): counter
+    /// (3, 9, ... 729) and remaining duration; a repeat while it lasts rolls 1/counter.
+    pub ally_switch_counter: u16,
+    pub ally_switch_dur: u8,
     pub helping_hand: u8,
     /// 0 none, 1 Follow Me, 2 Rage Powder (this turn).
     pub follow_me: u8,
