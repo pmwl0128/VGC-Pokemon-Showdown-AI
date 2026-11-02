@@ -206,6 +206,8 @@ pub struct Battle {
     pub last_faint_side: Option<u8>,
     /// Speed-ordered field positions for this switch-in event.
     pub log_lines: Vec<String>,
+    /// Index of the last `|move|` line (pinned `lastMoveLine`); `usize::MAX` when none.
+    pub last_move_line: usize,
     /// The move currently executing ignores breakable abilities (Mold Breaker).
     pub(crate) mold_breaker: bool,
     /// Gen 9: a move already used this turn by this side (Round, Fusion...).
@@ -274,6 +276,7 @@ impl Battle {
             cfg,
             last_faint_side: None,
             log_lines: vec![],
+            last_move_line: usize::MAX,
             mold_breaker: false,
             round_used: false,
             stall_turns: 0,
@@ -1101,6 +1104,24 @@ impl Battle {
             // Pinned Pokemon(): without a nickname, `set.name` is the base species name.
             self.dex.sp(self.sides[p.s()].mons[i as usize].species).base_species
         )
+    }
+
+    /// Pinned `attrLastMove`: append an attribute to the last `|move|` line; `[still]` blanks
+    /// its target field first (no animation, so the target is never shown).
+    pub(crate) fn attr_last_move(&mut self, attr: &str) {
+        if !self.cfg.log || self.last_move_line >= self.log_lines.len() {
+            return;
+        }
+        let i = self.last_move_line;
+        if attr == "[still]" {
+            let mut parts: Vec<String> = self.log_lines[i].split('|').map(str::to_string).collect();
+            if parts.len() > 4 {
+                parts[4].clear();
+            }
+            self.log_lines[i] = parts.join("|");
+        }
+        self.log_lines[i].push('|');
+        self.log_lines[i].push_str(attr);
     }
 
     /// Pinned `getHealth().secret`: `hp/maxhp`, a status suffix, `0 fnt` when fainted.

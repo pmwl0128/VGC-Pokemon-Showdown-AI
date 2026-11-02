@@ -371,13 +371,16 @@ impl Battle {
             let _ = self.get_random_target(p, am.target);
             target = self.get_random_target(p, am.target);
         }
-        if am.fx == MoveFx::Round && self.round_used {
-            // A Round that an earlier Round prioritized runs with sourceEffect Round.
-            blog!(self, "|move|{}|{}|[from] move: Round", self.name(p), mv.name);
-        } else {
-            blog!(self, "|move|{}|{}", self.name(p), mv.name);
+        // addMove: `|move|user|Move|target[|[from] ...]`; attributes are appended later
+        // (attr_last_move). A Round that an earlier Round prioritized runs with sourceEffect Round.
+        if self.cfg.log {
+            let tname = target.map(|t| self.name(t)).unwrap_or_default();
+            let from = if am.fx == MoveFx::Round && self.round_used { "|[from] move: Round" } else { "" };
+            self.log_lines.push(format!("|move|{}|{}|{}{}", self.name(p), mv.name, tname, from));
+            self.last_move_line = self.log_lines.len() - 1;
         }
         let Some(target) = target else {
+            self.attr_last_move("[notarget]");
             blog!(self, "|-fail|{}", self.name(p));
             return false;
         };
@@ -406,7 +409,8 @@ impl Battle {
             return true;
         }
         if !field && n == 0 {
-            blog!(self, "|-fail|{}|[notarget]", self.name(p));
+            self.attr_last_move("[notarget]");
+            blog!(self, "|-fail|{}", self.name(p));
             return false;
         }
 
@@ -421,6 +425,7 @@ impl Battle {
         if field {
             if !self.move_try(p, am, &[p]) {
                 blog!(self, "|-fail|{}", self.name(p));
+                self.attr_last_move("[still]");
                 self.after_move_fail(p, am);
                 return false;
             }
@@ -440,6 +445,7 @@ impl Battle {
         // onTry / PrepareHit (move-specific failure conditions).
         if !self.move_try(p, am, &targets[..n]) {
             blog!(self, "|-fail|{}", self.name(p));
+            self.attr_last_move("[still]");
             self.after_move_fail(p, am);
             return false;
         }
@@ -1153,6 +1159,9 @@ impl Battle {
                     _ => false,
                 };
                 if !hits {
+                    if !am.spread_hit {
+                        self.attr_last_move("[miss]");
+                    }
                     blog!(self, "|-miss|{}|{}", self.name(p), self.name(t));
                     res[i] = Hit::Failed;
                 }
@@ -1183,6 +1192,9 @@ impl Battle {
             }
             let t = tg[i];
             if !self.accuracy_hits(p, t, am) {
+                if !am.spread_hit {
+                    self.attr_last_move("[miss]");
+                }
                 blog!(self, "|-miss|{}|{}", self.name(p), self.name(t));
                 res[i] = Hit::Failed;
             }
@@ -1214,6 +1226,14 @@ impl Battle {
                     m.vol.stall_dur = 0;
                 }
             }
+        }
+        // trySpreadMoveHit: `[spread] p1a,p2b` names the targets still hit after the steps.
+        if am.spread_hit && self.cfg.log {
+            let slots: Vec<String> = (0..n)
+                .filter(|&i| res[i] == Hit::Pending)
+                .map(|i| format!("p{}{}", tg[i].side + 1, if tg[i].slot == 0 { 'a' } else { 'b' }))
+                .collect();
+            self.attr_last_move(&format!("[spread] {}", slots.join(",")));
         }
         let live: crate::fixed::FixedVec<Pos, 4> = (0..n).filter(|&i| res[i] == Hit::Pending).map(|i| tg[i]).collect();
         let any_fail = (0..n).any(|i| res[i] == Hit::Failed);

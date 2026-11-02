@@ -192,6 +192,7 @@ fn resample_mon(src: &Mon, set: &SetSpec) -> Mon {
 pub fn determinize(b: &Battle, viewer: usize, pool: &SetPool, rng: &mut Rng) -> Battle {
     let mut out = b.clone();
     out.log_lines.clear();
+    out.last_move_line = usize::MAX;
     out.cfg.log = false;
     out.rng = rng.fork();
     let opp = 1 - viewer;
