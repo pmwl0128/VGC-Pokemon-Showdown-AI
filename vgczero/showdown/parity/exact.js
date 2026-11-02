@@ -5,7 +5,7 @@
 // outcome distributions, both the next-decision state and the full list of RNG draws must be
 // identical; the first differing draw is reported with Showdown's event stack.
 //
-//   node exact.js [--battles 100] [--seed 1] [--sample 0.35] [--limit 20] [--dump file]
+//   node exact.js [--battles 100] [--seed 1] [--sample 0.35] [--limit 20] [--dump file] [--log]
 //                 [--require species,...] [--only id,...] [--no-whitelist]
 //
 // The engine binary must be built with the trace feature:
@@ -32,6 +32,11 @@ const ONLY = arg('--only', null);
 const WHITELIST = process.argv.includes('--no-whitelist') ? null : path.join(pinned.root,
 	'model_train/artifacts/evaluation/fast-engine-state-20261024/distribution/whitelist.verified.json');
 const policy = WHITELIST ? compileWhitelist(JSON.parse(fs.readFileSync(WHITELIST, 'utf8'))) : null;
+// --log: channel-parity baseline (contract 5). Showdown's omniscient channel (-1, the secret line of
+// every |split|) against the engine's log, both reduced to the line types the tracker consumes.
+const LOGCMP = process.argv.includes('--log');
+const { extractChannelMessages } = require(path.join(L.PS_DIR, 'dist', 'sim', 'battle'));
+const { IGNORED } = require(path.join(pinned.root, 'model_train', 'env', 'tracker.cjs'));
 
 const sodium = tag => 'sodium,' + crypto.createHash('sha256').update(`exact/${tag}`).digest('hex');
 
@@ -139,6 +144,26 @@ function firstDiff(a, b) {
 	return a.length === b.length ? -1 : n;
 }
 
+/** Lines the tracker acts on (drops '', t:, -crit, -supereffective, ... per tracker.cjs IGNORED). */
+function trackerLines(lines) {
+	return lines.filter(l => !IGNORED.has(l.split('|')[1] || ''));
+}
+
+/** Multiset difference of exact line strings: Showdown-only and engine-only lines. */
+function multisetDiff(a, b) {
+	const count = new Map();
+	for (const l of a) count.set(l, (count.get(l) || 0) + 1);
+	for (const l of b) count.set(l, (count.get(l) || 0) - 1);
+	const onlyA = [], onlyB = [];
+	for (const [l, n] of count) {
+		for (let i = 0; i < n; i++) onlyA.push(l);
+		for (let i = 0; i < -n; i++) onlyB.push(l);
+	}
+	return { onlyA, onlyB };
+}
+
+const lineType = l => l.split('|')[1] || '';
+
 function main() {
 	const t0 = Date.now();
 	const scenarios = generate().filter(sc => !ONLY || ONLY.split(',').includes(sc.id));
@@ -149,6 +174,9 @@ function main() {
 	const counts = { exact: 0, state: 0, draws: 0, skipped: 0, showdownError: 0 };
 	const byKind = {};
 	const firstEvents = {};
+	const logStats = { n: 0, same: 0, diff: 0, missing: {}, extra: {} };
+	const logSamples = [];
+	const tally = (o, k) => { o[k] = (o[k] || 0) + 1; };
 	const failures = [];
 	for (const sc of scenarios) {
 		const e = engineOut.get(sc.id);
@@ -161,6 +189,19 @@ function main() {
 		kind.n++;
 		let s;
 		try { s = showdownExact(sc); } catch (err) { counts.showdownError++; continue; }
+		if (LOGCMP) {
+			const sd = trackerLines(extractChannelMessages(s.log.join('\n'), [-1])[-1]);
+			const en = trackerLines(e.log || []);
+			const { onlyA, onlyB } = multisetDiff(sd, en);
+			logStats.n++;
+			if (!onlyA.length && !onlyB.length) logStats.same++;
+			else {
+				logStats.diff++;
+				for (const l of onlyA) tally(logStats.missing, lineType(l));
+				for (const l of onlyB) tally(logStats.extra, lineType(l));
+				if (logSamples.length < LIMIT) logSamples.push({ id: sc.id, missing: onlyA.slice(0, 6), extra: onlyB.slice(0, 6) });
+			}
+		}
 		const keys = new Set([...Object.keys(s.features), ...Object.keys(e.features)]);
 		const stateDiff = [...keys].filter(k => String(s.features[k]) !== String(e.features[k]));
 		const di = firstDiff(s.draws, e.draws);
@@ -185,6 +226,13 @@ function main() {
 		` ${counts.state} state differs, ${counts.draws} same state but draws differ;` +
 		` ${counts.skipped} engine-unsupported, ${counts.showdownError} Showdown replay errors`);
 	console.log('  by kind:', Object.entries(byKind).map(([k, v]) => `${k} ${v.exact}/${v.n}`).join(', '));
+	if (LOGCMP) {
+		const top = o => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([k, v]) => `${k} ${v}`).join(', ');
+		console.log(`  channel parity (omniscient channel vs engine log, tracker-relevant lines): ${logStats.same}/${logStats.n} scenarios identical`);
+		console.log('    showdown lines the engine lacks, by type:', top(logStats.missing));
+		console.log('    engine lines showdown lacks, by type:', top(logStats.extra));
+		for (const x of logSamples) console.log(`    [${x.id}] missing ${JSON.stringify(x.missing)}\n      extra ${JSON.stringify(x.extra)}`);
+	}
 	console.log('  first divergence (Showdown event stack, innermost two):');
 	for (const [k, v] of Object.entries(firstEvents).sort((a, b) => b[1] - a[1]).slice(0, 25)) console.log(`    ${String(v).padStart(4)}  ${k}`);
 	if (process.env.EXACT_EACH) {
