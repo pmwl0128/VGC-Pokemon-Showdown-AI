@@ -55,6 +55,16 @@ pub struct Vol {
     /// (3, 9, ... 729) and remaining duration; a repeat while it lasts rolls 1/counter.
     pub ally_switch_counter: u16,
     pub ally_switch_dur: u8,
+    /// Showdown's chillyreception volatile (added by the move's priorityChargeCallback when
+    /// the action is queued; duration 1): only a -prepare message, but it joins the Residual
+    /// sort when the user is still on the field at the end of the turn.
+    pub chilly_reception: bool,
+    /// Showdown's lockedmove volatile (Outrage, Thrash, Petal Dance): the locked move slot + 1,
+    /// the remaining duration (2, refreshed by each hit while true turns remain) and the true
+    /// duration drawn at the start (2 or 3); fatigue confusion when it ends with none left.
+    pub locked_move: u8,
+    pub locked_dur: u8,
+    pub locked_true: u8,
     pub helping_hand: u8,
     /// 0 none, 1 Follow Me, 2 Rage Powder (this turn).
     pub follow_me: u8,

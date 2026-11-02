@@ -46,6 +46,8 @@ enum Res {
     Endure,
     Stall,
     AllySwitch,
+    ChillyReception,
+    LockedMove,
     HelpingHand,
     FollowMe,
     TwoTurnMove,
@@ -316,6 +318,12 @@ impl Battle {
                 if w.ally_switch_dur > 0 {
                     v.push(mon(LAST, 2, Cond::AllySwitch, Res::AllySwitch));
                 }
+                if w.chilly_reception {
+                    v.push(mon(LAST, 2, Cond::ChillyReception, Res::ChillyReception));
+                }
+                if w.locked_dur > 0 {
+                    v.push(mon(LAST, 2, Cond::LockedMove, Res::LockedMove));
+                }
                 if w.helping_hand > 0 {
                     v.push(mon(LAST, 2, Cond::HelpingHand, Res::HelpingHand));
                 }
@@ -491,6 +499,8 @@ impl Battle {
                     Res::Flinch | Res::Protect | Res::Endure | Res::HelpingHand | Res::FollowMe | Res::Roost | Res::TwoTurnSpent => true,
                     Res::Stall => v.stall_dur == 1,
                     Res::AllySwitch => v.ally_switch_dur == 1,
+                    Res::ChillyReception => true,
+                    Res::LockedMove => v.locked_dur == 1,
                     Res::Taunt => v.taunt == 1,
                     Res::Encore => v.encore == 1,
                     Res::Disable => v.disable == 1,
@@ -665,6 +675,24 @@ impl Battle {
             Res::Endure => self.mm(p).vol.endure = false,
             Res::HelpingHand => self.mm(p).vol.helping_hand = 0,
             Res::FollowMe => self.mm(p).vol.follow_me = 0,
+            Res::ChillyReception => self.mm(p).vol.chilly_reception = false,
+            Res::LockedMove => {
+                // Showdown counts the duration down first: at 0 the effect ends (onEnd) and
+                // onResidual does not run; otherwise onResidual drops the lock of a sleeping
+                // user silently and spends a true turn.
+                if self.m(p).vol.locked_dur == 1 {
+                    self.end_locked_move(p);
+                } else if self.m(p).status == Status::Slp {
+                    let v = &mut self.mm(p).vol;
+                    v.locked_move = 0;
+                    v.locked_dur = 0;
+                    v.locked_true = 0;
+                } else {
+                    let v = &mut self.mm(p).vol;
+                    v.locked_dur -= 1;
+                    v.locked_true = v.locked_true.saturating_sub(1);
+                }
+            }
             Res::Stall => {
                 let v = &mut self.mm(p).vol;
                 v.stall_dur -= 1;

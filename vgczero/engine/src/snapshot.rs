@@ -547,6 +547,12 @@ impl Battle {
                 "phantomforce" | "shadowforce" => v.semi_inv = SemiInv::Shadow,
                 "solarbeam" | "solarblade" | "electroshot" | "meteorbeam" => {}
                 "mustrecharge" => v.must_recharge = true,
+                "chillyreception" => v.chilly_reception = true,
+                "lockedmove" => {
+                    v.locked_move = slot_of(s(st, "move"))? + 1;
+                    v.locked_dur = dur;
+                    v.locked_true = i(st, "trueDuration") as u8;
+                }
                 "minimize" => v.minimize = true,
                 "focusenergy" => crit_stage = crit_stage.max(2),
                 "dragoncheer" => crit_stage = crit_stage.max(if b(st, "hasDragonType") { 2 } else { 1 }),
@@ -815,6 +821,9 @@ impl Battle {
         }
         if v.ally_switch_dur > 0 {
             push(format!("allyswitch={}/{}", v.ally_switch_counter, v.ally_switch_dur));
+        }
+        if v.locked_dur > 0 {
+            push(format!("lockedmove={}/{}/{}", d.mv(m.moves[(v.locked_move - 1) as usize]).id, v.locked_dur, v.locked_true));
         }
         if v.must_recharge {
             push("mustrecharge=y".into());

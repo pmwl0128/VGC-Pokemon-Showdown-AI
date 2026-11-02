@@ -247,6 +247,7 @@ pub enum VolKind {
     TarShot,
     SmackDown,
     Minimize,
+    LockedMove,
     Unsupported,
 }
 
@@ -291,6 +292,7 @@ impl VolKind {
             "tarshot" => VolKind::TarShot,
             "smackdown" => VolKind::SmackDown,
             "minimize" => VolKind::Minimize,
+            "lockedmove" => VolKind::LockedMove,
             _ => VolKind::Unsupported,
         }
     }
@@ -592,6 +594,7 @@ conds! {
     Brn = "brn",
     BurningBulwark = "burningbulwark",
     Charge = "charge",
+    ChillyReception = "chillyreception",
     ChoiceLock = "choicelock",
     Curse = "curse",
     Dig = "dig",
@@ -616,6 +619,7 @@ conds! {
     LeechSeed = "leechseed",
     Leftovers = "leftovers",
     LightScreen = "lightscreen",
+    LockedMove = "lockedmove",
     MagnetRise = "magnetrise",
     Minimize = "minimize",
     Mist = "mist",

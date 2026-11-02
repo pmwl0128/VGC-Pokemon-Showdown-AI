@@ -57,8 +57,14 @@ impl Battle {
             return Some(a == PASS);
         }
         let m = self.m(p);
-        if m.vol.must_recharge || m.vol.charging > 0 {
-            let s = if m.vol.charging > 0 { (m.vol.charging - 1) as usize } else { 0 };
+        if m.vol.must_recharge || m.vol.charging > 0 || m.vol.locked_dur > 0 {
+            let s = if m.vol.charging > 0 {
+                (m.vol.charging - 1) as usize
+            } else if m.vol.locked_dur > 0 {
+                (m.vol.locked_move - 1) as usize
+            } else {
+                0
+            };
             return Some(a == move_action(s, T_FOE0, false));
         }
         match decode(a) {
@@ -82,8 +88,14 @@ impl Battle {
         let m = self.m(p);
         let mut mask = 0u32;
         // Locked into an action: recharge, second turn of a charge move.
-        if m.vol.must_recharge || m.vol.charging > 0 {
-            let s = if m.vol.charging > 0 { (m.vol.charging - 1) as usize } else { 0 };
+        if m.vol.must_recharge || m.vol.charging > 0 || m.vol.locked_dur > 0 {
+            let s = if m.vol.charging > 0 {
+                (m.vol.charging - 1) as usize
+            } else if m.vol.locked_dur > 0 {
+                (m.vol.locked_move - 1) as usize
+            } else {
+                0
+            };
             return 1 << move_action(s, T_FOE0, false);
         }
         let can_mega = self.can_mega(p);

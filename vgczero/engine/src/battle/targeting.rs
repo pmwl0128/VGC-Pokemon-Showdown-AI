@@ -197,6 +197,12 @@ impl Battle {
         (loc, self.orig_code(Self::at_loc(p, loc)))
     }
 
+    /// resolveAction for a locked move (Outrage): chooseMove passes lastMoveTargetLoc, so no
+    /// random target is drawn; originalTarget is whoever stands at that location.
+    pub(crate) fn keep_target(&self, p: Pos, loc: i8) -> (i8, u8) {
+        (loc, self.orig_code(Self::at_loc(p, loc)))
+    }
+
     /// Showdown's `targetLoc` for an engine target code (crate::actions): foe-or-ally moves
     /// use 0/1 for the foe slots and 2 for the ally; an adjacentAlly move always aims at the
     /// ally; adjacentAllyOrSelf uses 2 for the ally and 0 for the user.

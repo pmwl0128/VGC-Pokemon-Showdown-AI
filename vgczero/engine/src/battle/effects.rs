@@ -68,6 +68,13 @@ impl Battle {
                 *x = -*x;
             }
         }
+        // ChangeBoost: Simple doubles every stage (pinned abilities.ts simple; breakable, so
+        // `tab` already reads Other under Mold Breaker).
+        if tab == Ab::Simple {
+            for x in b.iter_mut() {
+                *x *= 2;
+            }
+        }
         // TryBoost: drop prevention from others.
         if from_other {
             let mut blocked_all = false;
@@ -288,10 +295,20 @@ impl Battle {
 
     /// Try to inflict a major status. Returns true on success.
     pub fn try_set_status(&mut self, tgt: Pos, st: Status, src: Option<Pos>) -> bool {
+        self.set_status_inner(tgt, st, src, false)
+    }
+
+    /// Pinned Pokemon.setStatus as Rest calls it: a different existing status is replaced
+    /// (trySetStatus is what refuses a statused Pokemon); the same status still fails.
+    pub fn set_status_over(&mut self, tgt: Pos, st: Status, src: Option<Pos>) -> bool {
+        self.set_status_inner(tgt, st, src, true)
+    }
+
+    fn set_status_inner(&mut self, tgt: Pos, st: Status, src: Option<Pos>, overwrite: bool) -> bool {
         if !self.is_live(tgt) || st == Status::None {
             return false;
         }
-        if self.m(tgt).status != Status::None {
+        if self.m(tgt).status != Status::None && (!overwrite || self.m(tgt).status == st) {
             return false;
         }
         if self.status_immune(tgt, st, src) {
@@ -580,6 +597,23 @@ impl Battle {
                 m.vol.partial_trap = dur;
                 m.vol.partial_trap_src = s.code();
                 m.vol.partial_trap_mon = mon;
+            }
+            // Pinned conditions.ts lockedmove: onStart draws trueDuration = random(2, 4) and
+            // locks the move just used (duration 2); onRestart refreshes the duration while
+            // at least two true turns remain.
+            VolKind::LockedMove => {
+                let v = self.m(tgt).vol;
+                if v.locked_dur > 0 {
+                    if v.locked_true >= 2 {
+                        self.mm(tgt).vol.locked_dur = 2;
+                    }
+                    return true;
+                }
+                let drawn = self.rng.range(2, 4) as u8;
+                let v = &mut self.mm(tgt).vol;
+                v.locked_true = drawn;
+                v.locked_dur = 2;
+                v.locked_move = v.last_move_slot + 1;
             }
             VolKind::Endure => self.mm(tgt).vol.endure = true,
             VolKind::DestinyBond => self.mm(tgt).vol.destiny_bond = true,

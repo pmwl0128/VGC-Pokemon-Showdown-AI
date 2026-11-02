@@ -719,6 +719,12 @@ impl Battle {
                             orig: NO_ORIG,
                         };
                         a.priority = self.modify_priority(p, mid, a.priority);
+                        // Showdown queues a priorityChargeMove action for a move with a
+                        // priorityChargeCallback (battle-queue.ts:242); Chilly Reception adds
+                        // its one-turn volatile there (no draw).
+                        if mv.fx == crate::kinds::MoveFx::ChillyReception {
+                            self.mm(p).vol.chilly_reception = true;
+                        }
                         // A recharge turn is Showdown's 'recharge' move: priority 0, target self.
                         if recharge {
                             a.priority = 0;
@@ -733,7 +739,13 @@ impl Battle {
                             // draw); its getActionSpeed getTarget draws (see recharge_target_draw).
                             self.recharge_target_draw(p);
                         } else {
-                            let (loc, orig) = self.resolve_target(p, mid, if self.m(p).vol.charging > 0 { None } else { Some(target) });
+                            let (loc, orig) = if self.m(p).vol.locked_dur > 0 {
+                                // lockedmove: chooseMove passes lastMoveTargetLoc; no draw.
+                                let loc = self.m(p).vol.last_move_loc;
+                                self.keep_target(p, loc)
+                            } else {
+                                self.resolve_target(p, mid, if self.m(p).vol.charging > 0 { None } else { Some(target) })
+                            };
                             a.loc = loc;
                             a.orig = orig;
                             // getActionSpeed (end of resolveAction) calls getTarget for ModifyPriority.
@@ -845,6 +857,9 @@ impl Battle {
         self.mm(p).speed = s;
         self.queue.remove_where(|a| a.pos == p && a.mon == mon);
         let d = self.dex;
+        if d.mv(move_id).fx == crate::kinds::MoveFx::ChillyReception {
+            self.mm(p).vol.chilly_reception = true;
+        }
         let mut a = Action {
             kind: ActionKind::Move { mslot: mslot as u8, target: TARGET_RANDOM, recharge: false },
             pos: p,

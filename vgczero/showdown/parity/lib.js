@@ -359,6 +359,7 @@ const TRACKED_VOLATILES = {
 	choicelock: s => s.move,
 	stall: s => `${s.counter}/${s.duration}`,
 	allyswitch: s => `${s.counter}/${s.duration}`,
+	lockedmove: s => `${s.move}/${s.duration}/${s.trueDuration}`,
 	mustrecharge: s => 'y',
 	twoturnmove: s => s.move,
 	glaiverush: s => 'y',

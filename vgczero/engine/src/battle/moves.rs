@@ -43,6 +43,8 @@ impl Battle {
         }
         let d = self.dex;
         let user = self.sides[p.s()].active[p.i()];
+        // runMove: a locked move (Outrage) pays no PP (`if (!lockedMove) deductPP`).
+        let locked = self.m(p).vol.locked_dur > 0;
         {
             let m = self.mm(p);
             m.vol.move_actions = m.vol.move_actions.saturating_add(1);
@@ -95,7 +97,7 @@ impl Battle {
 
         // PP and last-move bookkeeping (moveUsed).
         let struggle = move_id == d.struggle;
-        if !struggle && !charging {
+        if !struggle && !charging && !locked {
             let m = self.mm(p);
             if m.pp[mslot] == 0 {
                 blog!(self, "|cant|{}|nopp", self.name(p));
@@ -126,6 +128,10 @@ impl Battle {
         // AfterMove: White Herb, and Charge ending after an Electric move (any outcome).
         self.white_herb_event(p, true);
         self.end_charge(p, ty, move_id);
+        // lockedmove.onAfterMove: the volatile ends on the turn after its last refresh.
+        if self.is_live(p) && self.m(p).vol.locked_dur == 1 {
+            self.end_locked_move(p);
+        }
         if self.dex.mv(move_id).fx == MoveFx::Round {
             self.round_used = true;
             // The next queued Round (either side) moves next.
@@ -805,6 +811,78 @@ impl Battle {
             p.ally()
         } else {
             p
+        }
+    }
+
+    /// Pinned lockedmove.onEnd: the lock is cleared; the user is confused by fatigue unless more
+    /// than one true turn remained (the rampage was cut short).
+    pub(crate) fn end_locked_move(&mut self, p: Pos) {
+        let v = &mut self.mm(p).vol;
+        let remaining = v.locked_true;
+        v.locked_move = 0;
+        v.locked_dur = 0;
+        v.locked_true = 0;
+        if remaining <= 1 {
+            blog!(self, "|-start|{}|confusion|[fatigue]", self.name(p));
+            self.add_volatile(p, VolKind::Confusion, Some(p));
+        }
+    }
+
+    /// Pinned Pokemon.setAbility: the old ability's End (Unburden drops its volatile, Illusion
+    /// clears), a fresh abilityState, the new ability's Start, then the Update event's cures for
+    /// what the new ability forbids (Limber, Insomnia / Vital Spirit, Magma Armor, Own Tempo,
+    /// Oblivious; Water Veil and Immunity are not modelled anywhere in the engine).
+    pub(crate) fn replace_ability(&mut self, t: Pos, new: crate::dex::AbilityId) {
+        self.ability_end(t);
+        {
+            let m = self.mm(t);
+            m.ability = new;
+            m.vol.ability_changed = true;
+            m.vol.protean = false;
+            m.vol.flash_fire = false;
+        }
+        self.reveal_ability(t);
+        self.ability_start(t);
+        self.ability_update_cures(t);
+    }
+
+    /// The End handlers of the abilities the engine keeps state for.
+    pub(crate) fn ability_end(&mut self, t: Pos) {
+        match self.dex.ab(self.m(t).ability) {
+            Ab::Unburden => self.mm(t).vol.unburden = false,
+            Ab::Illusion => self.mm(t).vol.illusion_species = 0,
+            _ => {}
+        }
+        let m = self.mm(t);
+        m.vol.protean = false;
+        m.vol.flash_fire = false;
+    }
+
+    /// onUpdate cures of the ability now held (runs for a suppressed ability too, as the Update
+    /// event does): Limber, Insomnia / Vital Spirit, Magma Armor, Own Tempo, Oblivious.
+    pub(crate) fn ability_update_cures(&mut self, t: Pos) {
+        if !self.is_live(t) {
+            return;
+        }
+        let ab = self.dex.ab(self.m(t).ability);
+        let st = self.m(t).status;
+        let cured = matches!(
+            (ab, st),
+            (Ab::Limber, Status::Par)
+                | (Ab::Insomnia | Ab::VitalSpirit, Status::Slp)
+                | (Ab::MagmaArmor, Status::Frz)
+        );
+        if cured {
+            blog!(self, "|-curestatus|{}|{:?}|[from] ability", self.name(t), st);
+            self.cure_status(t);
+        }
+        if ab == Ab::OwnTempo {
+            self.mm(t).vol.confusion = 0;
+        }
+        if ab == Ab::Oblivious {
+            let v = &mut self.mm(t).vol;
+            v.attract = false;
+            v.taunt = 0;
         }
     }
 
@@ -2042,6 +2120,46 @@ impl Battle {
                 }
                 return h > 0;
             }
+            // Pinned simplebeam: onTryHit refuses a cantsuppress, Simple or Truant target (the
+            // move's own TryHit runs in the hit loop, after accuracy); onHit setAbility('simple').
+            MoveFx::SimpleBeam => {
+                if !self.is_live(t) {
+                    return false;
+                }
+                let ab = self.m(t).ability;
+                let simple = self.dex.ability_id("simple").unwrap_or(0);
+                if self.dex.ability(ab).cantsuppress
+                    || ab == simple
+                    || self.dex.ability_id("truant").is_some_and(|tr| ab == tr)
+                {
+                    return false;
+                }
+                self.replace_ability(t, simple);
+                return true;
+            }
+            // Pinned magicpowder.onHit: a pure Psychic target fails; otherwise setType('Psychic').
+            MoveFx::MagicPowder => {
+                if !self.is_live(t) || self.m(t).types == [Type::Psychic, Type::None] {
+                    return false;
+                }
+                let m = self.mm(t);
+                m.types = [Type::Psychic, Type::None];
+                m.vol.type_changed = true;
+                blog!(self, "|-start|{}|typechange|Psychic", self.name(t));
+                return true;
+            }
+            // Pinned speedswap.onHit: the user and the target trade their stored Speed stats; the
+            // cached action speed catches up at the next updateSpeed, as in Showdown.
+            MoveFx::SpeedSwap => {
+                if !self.is_live(t) {
+                    return false;
+                }
+                let (ps, ts) = (self.m(p).stats[5], self.m(t).stats[5]);
+                self.mm(p).stats[5] = ts;
+                self.mm(t).stats[5] = ps;
+                blog!(self, "|-activate|{}|move: Speed Swap|[of] {}", self.name(p), self.name(t));
+                return true;
+            }
             MoveFx::Soak => {
                 if !self.is_live(t) || self.m(t).types == [Type::Water, Type::None] {
                     return false;
@@ -2061,19 +2179,21 @@ impl Battle {
                 if self.dex.ability(a).failskillswap || self.dex.ability(b).failskillswap {
                     return false;
                 }
+                // setAbility on both: the old abilities' End (fresh abilityStates, Unburden,
+                // Illusion), then battle.skillSwap's Start for the target, then the user, then
+                // the Update cures.
+                self.ability_end(p);
+                self.ability_end(t);
                 self.mm(p).ability = b;
                 self.mm(t).ability = a;
-                // Fresh abilityStates (Protean may act again); Flash Fire's End drops its boost.
-                for q in [p, t] {
-                    let m = self.mm(q);
-                    m.vol.protean = false;
-                    m.vol.flash_fire = false;
-                }
+                self.mm(p).vol.ability_changed = true;
+                self.mm(t).vol.ability_changed = true;
                 self.reveal_ability(p);
                 self.reveal_ability(t);
-                // battle.skillSwap: Start for the target, then the user, allies included.
                 self.ability_start(t);
                 self.ability_start(p);
+                self.ability_update_cures(t);
+                self.ability_update_cures(p);
                 return true;
             }
             MoveFx::Entrainment | MoveFx::WorrySeed => {
@@ -2096,11 +2216,9 @@ impl Battle {
                 if am.fx == MoveFx::Entrainment && self.dex.ability(new).noentrain {
                     return false;
                 }
-                self.mm(t).ability = new;
-                self.mm(t).vol.ability_changed = true;
-                if am.fx == MoveFx::WorrySeed && self.m(t).status == Status::Slp {
-                    self.cure_status(t);
-                }
+                // setAbility: End of the old ability, Start of the new one, then the Update
+                // cures (Worry Seed's Insomnia wakes the target there).
+                self.replace_ability(t, new);
                 return true;
             }
             MoveFx::StrengthSap => {
@@ -2217,7 +2335,7 @@ impl Battle {
                 let mh = self.m(p).max_hp as u32;
                 // Through the status path: immunity, the champions [2, 3, 3] startTime draw
                 // (slp onStart) and the -status log; then Rest's full heal.
-                if !self.try_set_status(p, Status::Slp, Some(p)) {
+                if !self.set_status_over(p, Status::Slp, Some(p)) {
                     return false;
                 }
                 // Pinned Rest.onHit overwrites what slp.onStart drew: the draw still happens,
@@ -3029,6 +3147,184 @@ mod tests {
         assert!(b.partial_trapper_active(f), "the trapper is still on the field, in its new slot");
         assert_eq!(v.leech_seed_src, p.code());
         assert_eq!(v.last_damage_src, p.code());
+    }
+
+    fn status_user(moves: &[&str]) -> TeamSpec {
+        team(vec![json!({"species": "hatterene", "ability": "magicbounce", "item": "",
+                         "moves": moves, "stats": [164, 110, 115, 156, 123, 49],
+                         "types": ["Psychic", "Fairy"], "weightkg": 5.1, "level": 50})])
+    }
+
+    /// Pinned simplebeam: the target's ability becomes Simple, which doubles its boosts
+    /// (abilities.ts simple.onChangeBoost); a Truant target refuses it.
+    #[test]
+    fn simple_beam_grants_simple_and_simple_doubles_boosts() {
+        setup();
+        let user = status_user(&["simplebeam"]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 1);
+        let p = Pos::new(0, 0);
+        let t = Pos::new(1, 0);
+        let am = b.make_active_move(p, dex().move_id("simplebeam").unwrap(), 0, false);
+        assert!(b.status_move_effects(p, t, &am));
+        assert_eq!(b.m(t).ability, dex().ability_id("simple").unwrap());
+        assert!(b.m(t).vol.ability_changed);
+        b.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted);
+        assert_eq!(b.m(t).boosts[B_ATK], 2, "Simple doubles the stage");
+        assert!(!b.status_move_effects(p, t, &am), "a Simple target refuses it");
+        let mut b = fielded(&user, &foe, 1);
+        b.mm(t).ability = dex().ability_id("truant").unwrap();
+        assert!(!b.status_move_effects(p, t, &am), "a Truant target refuses it");
+    }
+
+    /// Pinned magicpowder.onHit: the target becomes pure Psychic; a pure Psychic target fails.
+    #[test]
+    fn magic_powder_makes_the_target_psychic() {
+        setup();
+        let user = status_user(&["magicpowder"]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 2);
+        let p = Pos::new(0, 0);
+        let t = Pos::new(1, 0);
+        let am = b.make_active_move(p, dex().move_id("magicpowder").unwrap(), 0, false);
+        assert!(b.status_move_effects(p, t, &am));
+        assert_eq!(b.m(t).types, [Type::Psychic, Type::None]);
+        assert!(b.m(t).vol.type_changed);
+        assert!(!b.status_move_effects(p, t, &am), "already pure Psychic");
+    }
+
+    /// Pinned speedswap.onHit: stored Speed stats trade places; boosts and the cached action
+    /// speed are untouched until the next updateSpeed.
+    #[test]
+    fn speed_swap_trades_stored_speed() {
+        setup();
+        let user = status_user(&["speedswap"]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 3);
+        let p = Pos::new(0, 0);
+        let t = Pos::new(1, 0);
+        let (ps, ts) = (b.m(p).stats[5], b.m(t).stats[5]);
+        assert_ne!(ps, ts);
+        let am = b.make_active_move(p, dex().move_id("speedswap").unwrap(), 0, false);
+        assert!(b.status_move_effects(p, t, &am));
+        assert_eq!((b.m(p).stats[5], b.m(t).stats[5]), (ts, ps));
+    }
+
+    /// Showdown's chillyreception volatile lasts one turn: queued with the move, gone after the
+    /// Residual tick (it only exists to join the sort when the user stayed on the field).
+    #[test]
+    fn chilly_reception_volatile_clears_at_residual() {
+        setup();
+        let user = status_user(&["chillyreception"]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 4);
+        let p = Pos::new(0, 0);
+        b.mm(p).vol.chilly_reception = true;
+        b.run_residual();
+        assert!(!b.m(p).vol.chilly_reception);
+    }
+
+    /// Pinned conditions.ts lockedmove: the first Outrage locks for a drawn 2 or 3 true turns
+    /// (duration 2); a hit while two remain refreshes the duration; the lock that ends with no
+    /// true turn left confuses by fatigue, one cut short does not.
+    #[test]
+    fn outrage_lock_counts_true_turns_and_fatigue() {
+        setup();
+        let user = team(vec![json!({"species": "dragonite", "ability": "multiscale", "item": "",
+                                    "moves": ["outrage", "protect"], "stats": [198, 186, 115, 120, 120, 100],
+                                    "types": ["Dragon", "Flying"], "weightkg": 210.0, "level": 50})]);
+        let foe = team(vec![]);
+        let mut seen = [0u32; 4];
+        for seed in 0..40u64 {
+            let mut b = fielded(&user, &foe, seed);
+            let p = Pos::new(0, 0);
+            b.mm(p).vol.last_move_slot = 0;
+            let rng0 = b.rng;
+            assert!(b.add_volatile(p, VolKind::LockedMove, Some(p)));
+            assert_ne!(b.rng, rng0, "onStart draws the true duration");
+            let v = b.m(p).vol;
+            assert_eq!((v.locked_move, v.locked_dur), (1, 2), "seed {seed}");
+            assert!(v.locked_true == 2 || v.locked_true == 3, "seed {seed}: {}", v.locked_true);
+            seen[v.locked_true as usize] += 1;
+            // Residual: the duration counts down and a true turn is spent.
+            b.run_residual();
+            let v = b.m(p).vol;
+            assert_eq!(v.locked_dur, 1, "seed {seed}");
+            let rng1 = b.rng;
+            assert!(b.add_volatile(p, VolKind::LockedMove, Some(p)), "a repeat hit restarts");
+            assert_eq!(b.rng, rng1, "onRestart draws nothing");
+            let v2 = b.m(p).vol;
+            if v.locked_true >= 2 {
+                assert_eq!(v2.locked_dur, 2, "seed {seed}: two true turns left refresh the duration");
+            } else {
+                assert_eq!(v2.locked_dur, 1, "seed {seed}: the last true turn does not");
+                b.end_locked_move(p);
+                assert!(b.m(p).vol.confusion > 0, "seed {seed}: fatigue");
+                assert_eq!(b.m(p).vol.locked_dur, 0);
+            }
+        }
+        assert!(seen[2] > 0 && seen[3] > 0, "both true durations occur: {seen:?}");
+        // Cut short with true turns left: no confusion.
+        let mut b = fielded(&user, &foe, 99);
+        let p = Pos::new(0, 0);
+        b.mm(p).vol.locked_move = 1;
+        b.mm(p).vol.locked_dur = 1;
+        b.mm(p).vol.locked_true = 2;
+        b.end_locked_move(p);
+        assert_eq!(b.m(p).vol.confusion, 0);
+        assert_eq!(b.m(p).vol.locked_dur, 0);
+        // A sleeping user drops the lock at Residual without fatigue.
+        let mut b = fielded(&user, &foe, 98);
+        b.mm(p).vol.locked_move = 1;
+        b.mm(p).vol.locked_dur = 2;
+        b.mm(p).vol.locked_true = 1;
+        b.mm(p).status = Status::Slp;
+        b.mm(p).status_turns = 3;
+        b.run_residual();
+        assert_eq!((b.m(p).vol.locked_dur, b.m(p).vol.confusion), (0, 0));
+    }
+
+    /// Pinned Rest.onHit uses setStatus, which replaces a different status (data/moves.ts rest):
+    /// a burned user falls asleep for three turns at full HP. trySetStatus would have failed.
+    #[test]
+    fn rest_replaces_an_existing_status() {
+        setup();
+        let user = team(vec![json!({"species": "snorlax", "ability": "thickfat", "item": "",
+                                    "moves": ["rest", "tackle"], "stats": [400, 110, 65, 65, 110, 30],
+                                    "types": ["Normal"], "weightkg": 460.0, "level": 50})]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 11);
+        let p = Pos::new(0, 0);
+        b.mm(p).hp = 100;
+        b.mm(p).status = Status::Brn;
+        let am = b.make_active_move(p, dex().move_id("rest").unwrap(), 0, false);
+        assert!(b.move_try(p, &am, &[p]));
+        assert!(b.status_move_effects(p, p, &am));
+        assert_eq!(b.m(p).status, Status::Slp);
+        assert_eq!(b.m(p).status_turns, 3);
+        assert_eq!(b.m(p).hp, b.m(p).max_hp);
+    }
+
+    /// Pinned Pokemon.setAbility: replacing Unburden runs its End (the speed volatile goes), and
+    /// the new ability's Update cures what it forbids (Limber cures paralysis).
+    #[test]
+    fn replacing_an_ability_runs_end_and_update() {
+        setup();
+        let user = status_user(&["simplebeam"]);
+        let foe = team(vec![]);
+        let mut b = fielded(&user, &foe, 12);
+        let p = Pos::new(0, 0);
+        let t = Pos::new(1, 0);
+        b.mm(t).ability = dex().ability_id("unburden").unwrap();
+        b.mm(t).vol.unburden = true;
+        let am = b.make_active_move(p, dex().move_id("simplebeam").unwrap(), 0, false);
+        assert!(b.status_move_effects(p, t, &am));
+        assert!(!b.m(t).vol.unburden, "Unburden's End removed its volatile");
+        assert_eq!(b.m(t).ability, dex().ability_id("simple").unwrap());
+        let mut b = fielded(&user, &foe, 13);
+        b.mm(t).status = Status::Par;
+        b.replace_ability(t, dex().ability_id("limber").unwrap());
+        assert_eq!(b.m(t).status, Status::None, "Limber's Update cured the paralysis");
     }
 
     /// Pinned Rest.onHit overwrites what slp.onStart drew (data/moves.ts:14979-14982): the draw
