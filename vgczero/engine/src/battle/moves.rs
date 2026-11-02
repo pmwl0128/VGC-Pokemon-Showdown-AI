@@ -988,6 +988,10 @@ impl Battle {
         if mv.terrain != Terrain::None {
             ok = self.set_terrain(mv.terrain, p);
         }
+        // selfSwitch of a field move (Chilly Reception): only after the move succeeded.
+        if ok && mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
+            self.mm(p).vol.switch_flag = true;
+        }
         match am.fx {
             MoveFx::Haze => {
                 for &q in &self.live_positions().collect::<crate::fixed::FixedVec<_, 4>>() {
@@ -2548,6 +2552,10 @@ impl Battle {
                 if roll < 10 && self.is_live(t) && !sub_hit {
                     self.add_volatile(t, VolKind::Flinch, Some(p));
                 }
+            }
+            // No fling status or volatile (Iron Ball): PrepareHit pushed nothing, no roll.
+            if st == Status::None && vk.is_none() {
+                return;
             }
             let _ = self.rng.below(100);
             if self.is_live(t) && !sub_hit {
