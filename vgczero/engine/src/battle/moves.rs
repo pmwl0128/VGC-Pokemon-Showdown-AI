@@ -191,6 +191,7 @@ impl Battle {
                 let thaw = m.status_turns == 0 || self.rng.chance(1, 4);
                 if thaw {
                     self.cure_status(p);
+                    blog!(self, "|-curestatus|{}|frz|[msg]", self.name(p));
                 } else {
                     blog!(self, "|cant|{}|frz", self.name(p));
                     return Err(true);
@@ -208,6 +209,7 @@ impl Battle {
         // Disable (7).
         let v = self.m(p).vol;
         if v.disable > 0 && self.m(p).moves[v.disable_slot as usize] == move_id {
+            blog!(self, "|cant|{}|Disable|{}", self.name(p), mv.name);
             return Err(true);
         }
         // Throat Chop (6), Heal Block.
@@ -219,7 +221,7 @@ impl Battle {
         }
         // Taunt (5).
         if v.taunt > 0 && mv.category == Category::Status {
-            blog!(self, "|cant|{}|move: Taunt", self.name(p));
+            blog!(self, "|cant|{}|move: Taunt|{}", self.name(p), mv.name);
             return Err(true);
         }
         // Gravity.
@@ -244,11 +246,15 @@ impl Battle {
             m.vol.confusion -= 1;
             if m.vol.confusion == 0 {
                 blog!(self, "|-end|{}|confusion", self.name(p));
-            } else if self.rng.chance(33, 100) {
-                let dmg = self.confusion_damage(p);
+            } else {
+                // Pinned confusion onBeforeMove: the activate fires on every attempt,
+                // before the 1/3 self-hit roll.
                 blog!(self, "|-activate|{}|confusion", self.name(p));
-                self.damage_from(p, dmg, Some(p), DmgKind::Confusion, LogFrom::Confusion);
-                return Err(true);
+                if self.rng.chance(33, 100) {
+                    let dmg = self.confusion_damage(p);
+                    self.damage_from(p, dmg, Some(p), DmgKind::Confusion, LogFrom::Confusion);
+                    return Err(true);
+                }
             }
         }
         // Attract (2).
@@ -335,12 +341,20 @@ impl Battle {
     /// Charge's onAfterMove / onMoveAborted: an Electric move other than Charge ends it.
     fn end_charge(&mut self, p: Pos, ty: Type, move_id: MoveId) {
         if ty == Type::Electric && self.dex.mv(move_id).id != "charge" && self.active_unfainted(p) {
-            self.mm(p).vol.charge = false;
+            // Pinned removeVolatile: the end line only when the volatile was there.
+            if self.m(p).vol.charge {
+                self.mm(p).vol.charge = false;
+                blog!(self, "|-end|{}|Charge|[silent]", self.name(p));
+            }
         }
     }
 
     /// Returns whether the move "did something" (not a failure), and the active move's type.
     fn use_move(&mut self, p: Pos, move_id: MoveId, mslot: usize, target: Option<Pos>, loc: i8, struggle: bool) -> (bool, Type) {
+        if struggle {
+            // Pinned struggle.onModifyMove.
+            blog!(self, "|-activate|{}|move: Struggle", self.name(p));
+        }
         // Stance Change (onModifyMove): Blade forme for attacks, Shield for King's Shield.
         if self.ab(p) == Ab::StanceChange && self.m(p).alt_species != 0 {
             let mv = self.dex.mv(move_id);
@@ -405,6 +419,22 @@ impl Battle {
             }
         }
         self.name(t)
+    }
+
+    /// Pinned retargetLastMove: rewrite the target segment of the last move line.
+    /// Dragon Darts uses it at hit 1 (see the try-move path), so a protected first
+    /// target shows the ally the dart actually strikes.
+    fn retarget_last_move(&mut self, t: Pos) {
+        if !self.cfg.log || self.last_move_line == usize::MAX {
+            return;
+        }
+        let tname = self.move_target_text(t);
+        let idx = self.last_move_line;
+        let mut parts: Vec<String> = self.log_lines[idx].split('|').map(str::to_string).collect();
+        if parts.len() > 4 {
+            parts[4] = tname;
+            self.log_lines[idx] = parts.join("|");
+        }
     }
 
     fn use_move_inner(&mut self, p: Pos, am: &mut ActiveMove, target: Option<Pos>, loc: i8) -> bool {
@@ -804,6 +834,13 @@ impl Battle {
             // charge; the still blanks the move line's target (the move still fires).
             blog!(self, "|-prepare|{}|{}", self.name(p), self.dex.mv(am.id).name);
             self.attr_last_move("[still]");
+            // Pinned effectiveWeather (message flag): a Mega Sol user's sun is announced.
+            if matches!(fx, MoveFx::SolarBeam | MoveFx::SolarBlade)
+                && self.ab(p) == Ab::MegaSol
+                && self.weather() != Weather::Sun
+            {
+                blog!(self, "|-activate|{}|ability: Mega Sol", self.name(p));
+            }
             return false;
         }
         // twoturnmove's onStart runs PrepareHit (Protean) on the charge turn.
@@ -1359,10 +1396,28 @@ impl Battle {
         // Screen-breaking moves act before damage.
         if matches!(am.fx, MoveFx::PsychicFangs | MoveFx::BrickBreak | MoveFx::RagingBull) {
             let side = live[0].s();
+            // Pinned onTryHit via removeSideCondition: each broken screen ends with its
+            // sideend line, in the reflect / lightscreen / auroraveil order.
+            let broken = [
+                (self.sides[side].conds.reflect > 0, "Reflect"),
+                (self.sides[side].conds.light_screen > 0, "move: Light Screen"),
+                (self.sides[side].conds.aurora_veil > 0, "move: Aurora Veil"),
+            ];
             let c = &mut self.sides[side].conds;
             c.reflect = 0;
             c.light_screen = 0;
             c.aurora_veil = 0;
+            for (on, label) in broken {
+                if on {
+                    blog!(self, "|-sideend|p{}: p{}|{}", side + 1, side + 1, label);
+                }
+            }
+        }
+        // Pinned hitStepMoveHitLoop: at hit 1 a smartTarget move (Dragon Darts)
+        // retargets its move line to the first target the loop strikes (the TryHit
+        // survivors), so a protected first target shows the ally instead.
+        if self.dex.mv(am.id).smart_target && !live.is_empty() {
+            self.retarget_last_move(live[0]);
         }
         let hit_mask = self.move_hit_loop(p, am, &live);
         // trySpreadMoveHit: `[spread] p1a,p2b` names the targets actually hit.
@@ -1398,6 +1453,12 @@ impl Battle {
                 blog!(self, "|-activate|{}|move: Quick Guard", self.name(t));
                 return Hit::NotFail;
             }
+        }
+        // Psychic Terrain blocks opposing priority moves on grounded targets (pinned
+        // onTryHitPriority 4: before the Protect family).
+        if foe && am.priority > 0 && self.field.terrain == Terrain::Psychic && self.is_grounded(t) && self.m(t).vol.semi_inv == SemiInv::None {
+            blog!(self, "|-activate|{}|move: Psychic Terrain", self.name(t));
+            return Hit::Failed;
         }
         // Protect family.
         let prot = self.m(t).vol.protect;
@@ -1446,11 +1507,6 @@ impl Battle {
                     return Hit::NotFail;
                 }
             }
-        }
-        // Psychic Terrain blocks opposing priority moves on grounded targets.
-        if foe && am.priority > 0 && self.field.terrain == Terrain::Psychic && self.is_grounded(t) && self.m(t).vol.semi_inv == SemiInv::None {
-            blog!(self, "|-activate|{}|move: Psychic Terrain", self.name(t));
-            return Hit::Failed;
         }
         // Magic Bounce: reflect reflectable status moves.
         // Magic Bounce reflects an ally's move too (no side check in onTryHit).
@@ -1502,26 +1558,38 @@ impl Battle {
                 true
             }
             (Ab::LightningRod, Type::Electric) | (Ab::StormDrain, Type::Water) => {
-                if !self.boost(t, &ups(B_SPA, 1), BoostSrc::SelfInflicted) {
-                    let aname = if tab == Ab::LightningRod { "Lightning Rod" } else { "Storm Drain" };
+                let aname = if tab == Ab::LightningRod { "Lightning Rod" } else { "Storm Drain" };
+                if self.boost(t, &ups(B_SPA, 1), BoostSrc::SelfInflicted) {
+                    self.reveal_ability(t);
+                    blog!(self, "|-ability|{}|{}|boost", self.name(t), aname);
+                } else {
                     blog!(self, "|-immune|{}|[from] ability: {}", self.name(t), aname);
                 }
                 true
             }
             (Ab::Sapsipper, Type::Grass) => {
-                if !self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                if self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                    self.reveal_ability(t);
+                    blog!(self, "|-ability|{}|Sap Sipper|boost", self.name(t));
+                } else {
                     blog!(self, "|-immune|{}|[from] ability: Sap Sipper", self.name(t));
                 }
                 true
             }
             (Ab::MotorDrive, Type::Electric) => {
-                if !self.boost(t, &ups(B_SPE, 1), BoostSrc::SelfInflicted) {
+                if self.boost(t, &ups(B_SPE, 1), BoostSrc::SelfInflicted) {
+                    self.reveal_ability(t);
+                    blog!(self, "|-ability|{}|Motor Drive|boost", self.name(t));
+                } else {
                     blog!(self, "|-immune|{}|[from] ability: Motor Drive", self.name(t));
                 }
                 true
             }
             (Ab::WellBakedBody, Type::Fire) => {
-                if !self.boost(t, &ups(B_DEF, 2), BoostSrc::SelfInflicted) {
+                if self.boost(t, &ups(B_DEF, 2), BoostSrc::SelfInflicted) {
+                    self.reveal_ability(t);
+                    blog!(self, "|-ability|{}|Well-Baked Body|boost", self.name(t));
+                } else {
                     blog!(self, "|-immune|{}|[from] ability: Well-Baked Body", self.name(t));
                 }
                 true
@@ -1541,7 +1609,10 @@ impl Battle {
                 true
             }
             (Ab::WindRider, _) if am.flags & flag::WIND != 0 => {
-                if !self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                if self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                    self.reveal_ability(t);
+                    blog!(self, "|-ability|{}|Wind Rider|boost", self.name(t));
+                } else {
                     blog!(self, "|-immune|{}|[from] ability: Wind Rider", self.name(t));
                 }
                 true
@@ -2399,6 +2470,23 @@ impl Battle {
                 }
                 self.reveal_item(p);
                 self.reveal_item(t);
+                // Pinned trick/switcheroo onHit lines (the activate says Trick for both).
+                let mname = self.dex.mv(am.id).name.clone();
+                blog!(self, "|-activate|{}|move: Trick|[of] {}", self.name(p), self.name(t));
+                if a != 0 {
+                    let iname = self.dex.item(a).name.clone();
+                    blog!(self, "|-item|{}|{}|[from] move: {}", self.name(t), iname, mname);
+                } else {
+                    let iname = self.dex.item(b).name.clone();
+                    blog!(self, "|-enditem|{}|{}|[silent]|[from] move: {}", self.name(t), iname, mname);
+                }
+                if b != 0 {
+                    let iname = self.dex.item(b).name.clone();
+                    blog!(self, "|-item|{}|{}|[from] move: {}", self.name(p), iname, mname);
+                } else {
+                    let iname = self.dex.item(a).name.clone();
+                    blog!(self, "|-enditem|{}|{}|[silent]|[from] move: {}", self.name(p), iname, mname);
+                }
                 return true;
             }
             MoveFx::Roost => {
@@ -2475,6 +2563,12 @@ impl Battle {
                 // (cantsuppress is not the flag that guard reads).
                 if self.dex.ability(a).failskillswap || self.dex.ability(b).failskillswap {
                     return false;
+                }
+                // Pinned battle.ts skillSwap.
+                if p.s() == t.s() {
+                    blog!(self, "|-activate|{}|Skill Swap|||[of] {}", self.name(p), self.name(t));
+                } else {
+                    blog!(self, "|-activate|{}|Skill Swap|{}|{}|[of] {}", self.name(p), self.dex.ability(b).name, self.dex.ability(a).name, self.name(t));
                 }
                 // setAbility on both: the old abilities' End (fresh abilityStates, Unburden,
                 // Illusion), then battle.skillSwap's Start for the target, then the user, then
@@ -2705,6 +2799,8 @@ impl Battle {
             }
             MoveFx::DestinyBond => {
                 self.mm(p).vol.destiny_bond = true;
+                // Pinned destinybond condition onStart.
+                blog!(self, "|-singlemove|{}|Destiny Bond", self.name(p));
                 return true;
             }
             MoveFx::Recycle => {
@@ -2747,7 +2843,7 @@ impl Battle {
             MoveFx::FocusEnergy => return self.add_volatile(p, VolKind::FocusEnergy, Some(p)),
             MoveFx::DragonCheer => {
                 if let Some(a) = self.live_ally(p) {
-                    return self.add_volatile(a, VolKind::DragonCheer, Some(p));
+                    return if self.add_volatile(a, VolKind::DragonCheer, Some(p)) { true } else { self.did_nothing(p) };
                 }
                 return false;
             }
@@ -3020,7 +3116,12 @@ impl Battle {
                         blog!(self, "|-ability|{}|Weak Armor|boost", self.name(t));
                     }
                 }
-                Ab::Electromorphosis => self.mm(t).vol.charge = true,
+                Ab::Electromorphosis => {
+                    self.mm(t).vol.charge = true;
+                    // Pinned charge condition onStart (the ability form names the hit move).
+                    let mname = self.dex.mv(am.id).name.clone();
+                    blog!(self, "|-start|{}|Charge|{}|[from] ability: Electromorphosis", self.name(t), mname);
+                }
                 Ab::Berserk => {
                     let m = self.m(t);
                     if (m.hp as u32) * 2 <= m.max_hp as u32 && (m.hp as u32 + dealt) * 2 > m.max_hp as u32 {
@@ -3254,9 +3355,11 @@ impl Battle {
                 }
             }
         }
-        // Shell Bell: an eighth of the damage dealt.
+        // Shell Bell: an eighth of the damage dealt, naming the damaged foe (pinned
+        // `this.heal(damage / 8, source, target)`).
         if !stole && ok && total > 0 && self.it(p) == It::ShellBell && !am.sheer_force && !self.m(p).vol.force_switch && self.is_live(p) {
-            self.heal_from(p, (total / 8).max(1), LogFrom::Item("Shell Bell"), None);
+            let src = targets.iter().copied().find(|&t| t != p);
+            self.heal_from(p, (total / 8).max(1), LogFrom::Item("Shell Bell"), src);
         }
         // Moxie / Eelevate: KO'd a target.
         let kos = targets.iter().filter(|&&t| t != p && !self.is_live(t)).count() as i8;

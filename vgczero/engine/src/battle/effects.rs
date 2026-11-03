@@ -64,6 +64,10 @@ pub enum LogFrom {
     Drain,
     /// A condition, weather or status: `[from] NAME`.
     Cond(&'static str),
+    /// The partially trapped residual: `[from] move: X|[partiallytrapped]`.
+    Trapped(crate::dex::MoveId),
+    /// A species effect (the Disguise bust): `[from] pokemon: X`.
+    Species(crate::dex::SpeciesId),
     /// `[from] item: NAME`.
     Item(&'static str),
     /// `[from] ability: NAME`.
@@ -157,19 +161,26 @@ impl Battle {
                 Ab::MirrorArmor => {
                     // Reflect drops back to the source.
                     let mut reflected = [0i8; 7];
-                    let mut any = false;
                     for i in 0..7 {
                         if b[i] < 0 {
+                            // Pinned: a stat the holder is already at -6 for passes through.
+                            if self.m(tgt).boosts[i] <= -6 {
+                                continue;
+                            }
                             reflected[i] = b[i];
                             b[i] = 0;
-                            any = true;
                         }
                     }
-                    if any {
-                        if let Some(s) = src.source() {
-                            if self.is_live(s) && self.ab(s) != Ab::MirrorArmor {
-                                blog!(self, "|-ability|{}|Mirror Armor", self.name(tgt));
-                                self.boost(s, &reflected, BoostSrc::Ability(tgt));
+                    if let Some(s) = src.source() {
+                        if self.is_live(s) && self.ab(s) != Ab::MirrorArmor {
+                            // Pinned mirrorarmor.onTryBoost: each reflected stat announces.
+                            for i in 0..7 {
+                                if reflected[i] < 0 {
+                                    blog!(self, "|-ability|{}|Mirror Armor", self.name(tgt));
+                                    let mut one = [0i8; 7];
+                                    one[i] = reflected[i];
+                                    self.boost(s, &one, BoostSrc::Ability(tgt));
+                                }
                             }
                         }
                     }
@@ -218,9 +229,10 @@ impl Battle {
             m.boosts[i] = new;
             let delta = new - old;
             if delta == 0 {
-                // Pinned boost reporting: a move- or item-driven boost still reports its
-                // zero delta (`-boost|X|atk|0`); ability-driven boosts report only changes.
-                if matches!(src, BoostSrc::Move(_) | BoostSrc::Seed(_)) {
+                // Pinned boost reporting: a move- or item-driven boost, and Intimidate
+                // (which passes isSecondary/isSelf), still report their zero delta;
+                // other ability-driven boosts report only changes.
+                if matches!(src, BoostSrc::Move(_) | BoostSrc::Seed(_) | BoostSrc::Intimidate(_)) {
                     let msg = if b[i] < 0 || old == -6 { "-unboost" } else { "-boost" };
                     blog!(self, "|{}|{}|{}|0", msg, self.name(tgt), STAT_NAMES[i]);
                 }
@@ -247,10 +259,13 @@ impl Battle {
                 if let Some((st, aname)) = up_stat {
                     let mut up = [0i8; 7];
                     up[st] = 2;
-                    // Pinned boost reporting names the ability behind a reported boost.
+                    // Pinned boost reporting names the ability behind a reported boost; the
+                    // reaction boost passes isSelf, so even a zero delta is reported.
                     if self.boost(tgt, &up, BoostSrc::SelfInflicted) {
                         self.reveal_ability(tgt);
                         blog!(self, "|-ability|{}|{}|boost", self.name(tgt), aname);
+                    } else {
+                        blog!(self, "|-boost|{}|{}|0", self.name(tgt), STAT_NAMES[st]);
                     }
                 }
             }
@@ -578,6 +593,8 @@ impl Battle {
                     return false;
                 }
                 self.mm(tgt).vol.crit_stage = if self.m(tgt).has_type(Type::Dragon) { 2 } else { 1 };
+                // Pinned dragoncheer condition onStart.
+                blog!(self, "|-start|{}|move: Dragon Cheer", self.name(tgt));
             }
             VolKind::LeechSeed => {
                 if self.m(tgt).has_type(Type::Grass) || self.m(tgt).vol.leech_seed {
@@ -636,7 +653,11 @@ impl Battle {
                 }
                 self.mm(tgt).vol.ingrain = true;
             }
-            VolKind::Charge => self.mm(tgt).vol.charge = true,
+            VolKind::Charge => {
+                self.mm(tgt).vol.charge = true;
+                // Pinned charge condition onStart (the plain move's form).
+                blog!(self, "|-start|{}|Charge", self.name(tgt));
+            }
             VolKind::LaserFocus => self.mm(tgt).vol.laser_focus = 2,
             VolKind::TarShot => {
                 if self.m(tgt).vol.tar_shot {
@@ -771,6 +792,8 @@ impl Battle {
                 Some(s) if s != tgt => format!("|[from] {}{}", n, of(s)),
                 _ => format!("|[from] {}", n),
             },
+            LogFrom::Trapped(id) => format!("|[from] move: {}|[partiallytrapped]", self.dex.mv(id).name),
+            LogFrom::Species(id) => format!("|[from] pokemon: {}", self.dex.sp(id).name),
             LogFrom::Item(n) => match src {
                 Some(s) if s != tgt => format!("|[from] item: {}{}", n, of(s)),
                 _ => format!("|[from] item: {}", n),
@@ -934,13 +957,13 @@ impl Battle {
         // disguise changes the forme for good and pays baseMaxhp / 8. Unlike the attacking
         // events, the Update event runs a suppressed ability's handler as well.
         if self.ab(p) == Ab::Disguise && self.disguise_bust_pending(p) {
-            let alt = self.dex.sp(self.m(p).alt_species);
-            let name = alt.name.clone();
-            blog!(self, "|-formechange|{}|{}|[from] ability: Disguise", self.name(p), name);
             self.mm(p).set_alt_forme(true);
             self.mm(p).alt_locked = true;
+            // Pinned champions formeChange (isPermanent): `detailschange`, then the bust
+            // damage names the new species (`pokemon: Mimikyu-Busted`).
+            blog!(self, "|detailschange|{}|{}", self.name(p), self.details(p));
             let eighth = (self.m(p).max_hp / 8) as u32;
-            self.damage_from(p, eighth, Some(p), DmgKind::Indirect, LogFrom::Ability("Disguise"));
+            self.damage_from(p, eighth, Some(p), DmgKind::Indirect, LogFrom::Species(self.m(p).species));
         }
         if self.m(p).item == 0 {
             return;

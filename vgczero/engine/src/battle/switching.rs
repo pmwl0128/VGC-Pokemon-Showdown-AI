@@ -439,6 +439,12 @@ impl Battle {
             }
             Ab::Frisk => {
                 for &q in &self.live_foes(p).collect::<crate::fixed::FixedVec<_, 2>>() {
+                    // Pinned frisk onStart.
+                    let it = self.m(q).item;
+                    if it != 0 {
+                        let iname = self.dex.item(it).name.clone();
+                        blog!(self, "|-item|{}|{}|[from] ability: Frisk|[of] {}", self.name(q), iname, self.name(p));
+                    }
                     self.reveal_item(q);
                 }
                 self.reveal_ability(p);
@@ -466,6 +472,9 @@ impl Battle {
             // onStart: eachEvent('WeatherChange') (also on its End).
             Ab::AirLock | Ab::CloudNine => {
                 self.reveal_ability(p);
+                // Pinned cloudnine/airlock onSwitchIn.
+                let aname = if ab == Ab::AirLock { "Air Lock" } else { "Cloud Nine" };
+                blog!(self, "|-ability|{}|{}", self.name(p), aname);
                 self.each_event_draws();
             }
             Ab::CuriousMedicine => {

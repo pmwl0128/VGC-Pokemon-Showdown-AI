@@ -34,6 +34,7 @@ for (let g = 0; g <= G; g++) {
 			const state = preview ? null : L.exportState(battle, [ta, tb]);
 			const seed = battle.prng.getSeed();
 			const engineChoices = choices.map((c, i) => L.engineChoice(battle.sides[i], c));
+			console.log('active volatiles: ' + JSON.stringify(state.sides.map(s => s.active.map(i => i === null || i === undefined ? null : Object.keys(s.mons[i].volatiles || {})))));
 			console.log(`=== x${SEED}.${g}.${steps} kind=${battle.requestState} take=${take}`);
 			console.log(`teams: ${ta} vs ${tb}`);
 			console.log(`choices: ${JSON.stringify(engineChoices)}`);

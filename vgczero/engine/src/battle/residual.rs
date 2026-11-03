@@ -393,8 +393,9 @@ impl Battle {
                     return;
                 }
                 let w = self.weather();
-                // Pinned onFieldResidual: the upkeep line, then eachEvent('Weather').
-                blog!(self, "|-weather|{}|[upkeep]", Self::weather_id(w));
+                // Pinned sunnyday onFieldResidual: the upkeep names the field weather
+                // even while Cloud Nine suppresses it.
+                blog!(self, "|-weather|{}|[upkeep]", Self::weather_id(self.field.weather));
                 // Weather effects on each active Pokemon, by speed.
                 // eachEvent('Weather') then eachEvent('Update'); Pokemon faint
                 // only after the whole handler (fieldEvent's faintMessages).
@@ -675,7 +676,13 @@ impl Battle {
                     }
                     return;
                 }
-                self.damage(p, (mh / 8).max(1), None, DmgKind::Indirect);
+                let pm = self.m(p).vol.partial_trap_move;
+                if pm != 0 {
+                    // Pinned battle.ts damage: the trapped residual names the move.
+                    self.damage_from(p, (mh / 8).max(1), None, DmgKind::Indirect, LogFrom::Trapped(pm));
+                } else {
+                    self.damage(p, (mh / 8).max(1), None, DmgKind::Indirect);
+                }
             }
             Res::Taunt => {
                 let m = self.mm(p);
@@ -696,7 +703,14 @@ impl Battle {
                     blog!(self, "|-end|{}|Encore", self.name(p));
                 }
             }
-            Res::Disable => self.mm(p).vol.disable -= 1,
+            Res::Disable => {
+                let m = self.mm(p);
+                m.vol.disable -= 1;
+                if m.vol.disable == 0 {
+                    // Pinned disable condition onEnd.
+                    blog!(self, "|-end|{}|Disable", self.name(p));
+                }
+            }
             Res::MagnetRise => self.mm(p).vol.magnet_rise -= 1,
             Res::HealBlock => {
                 let m = self.mm(p);
