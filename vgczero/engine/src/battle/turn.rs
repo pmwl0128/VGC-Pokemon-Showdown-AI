@@ -155,7 +155,7 @@ impl Battle {
             self.mm(p).vol.skip_before_switch_out = false;
             self.queue.remove_where(|a| a.pos == p && a.mon == old);
         }
-        self.switch_out_in(p, to);
+        self.switch_out_in(p, to, false);
         self.insert_run_switch(p);
     }
 
@@ -249,6 +249,12 @@ impl Battle {
                 for s in 0..2 {
                     for slot in 0..2 {
                         let p = Pos::new(s, slot);
+                        // runSwitch's BeforeSwitchIn (pinned illusion's onBeforeSwitchIn):
+                        // the battle-start switch line already shows the illusion.
+                        if self.dex.ab(self.m(p).ability) == crate::kinds::Ab::Illusion {
+                            let pick = self.illusion_target(p.s(), p.i());
+                            self.mm(p).vol.illusion_species = pick;
+                        }
                         blog!(self, "|switch|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
                         self.insert_run_switch(p);
                     }

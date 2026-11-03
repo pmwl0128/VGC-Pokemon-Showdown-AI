@@ -173,7 +173,7 @@ impl Battle {
             m.status_turns = m.status_turns.saturating_sub(1);
             if m.status_turns == 0 {
                 self.cure_status(p);
-                blog!(self, "|-curestatus|{}|slp", self.name(p));
+                blog!(self, "|-curestatus|{}|slp|[msg]", self.name(p));
             } else {
                 blog!(self, "|cant|{}|slp", self.name(p));
                 if !mv.sleep_usable {
@@ -252,9 +252,15 @@ impl Battle {
             }
         }
         // Attract (2).
-        if self.m(p).vol.attract && self.rng.chance(1, 2) {
-            blog!(self, "|cant|{}|Attract", self.name(p));
-            return Err(true);
+        if self.m(p).vol.attract {
+            // Pinned attract condition onBeforeMove: the activate names the source on
+            // every attempt, before the 1/2 roll.
+            let asrc = self.m(p).vol.attract_src;
+            blog!(self, "|-activate|{}|move: Attract|[of] {}", self.name(p), self.name(Pos::from_code(asrc)));
+            if self.rng.chance(1, 2) {
+                blog!(self, "|cant|{}|Attract", self.name(p));
+                return Err(true);
+            }
         }
         // Paralysis (1): Champions full-paralysis chance is 1/8.
         if self.m(p).status == Status::Par && self.rng.chance(1, 8) {
@@ -338,10 +344,21 @@ impl Battle {
         // Stance Change (onModifyMove): Blade forme for attacks, Shield for King's Shield.
         if self.ab(p) == Ab::StanceChange && self.m(p).alt_species != 0 {
             let mv = self.dex.mv(move_id);
-            if mv.category != Category::Status {
-                self.mm(p).set_alt_forme(true);
+            let change = if mv.category != Category::Status {
+                Some(true)
             } else if mv.fx == MoveFx::KingsShield {
-                self.mm(p).set_alt_forme(false);
+                Some(false)
+            } else {
+                None
+            };
+            if let Some(blade) = change {
+                let before = self.m(p).species;
+                self.mm(p).set_alt_forme(blade);
+                if self.m(p).species != before {
+                    // Pinned stancechange onModifyMove: formeChange logs `-formechange` (no [from]).
+                    let name = self.dex.sp(self.m(p).species).name.clone();
+                    blog!(self, "|-formechange|{}|{}|", self.name(p), name);
+                }
             }
             // setSpecies leaves the cached speed at the new raw Speed stat; Tailwind, items
             // and boosts are not re-applied until the next updateSpeed.
@@ -353,6 +370,41 @@ impl Battle {
         self.mold_breaker = false;
         // Throat Spray, Life Orb etc. run in after-move hooks inside.
         (ok, am.ty)
+    }
+
+    /// Pinned addMove: `|move|user|Move|target[|[from] ...]`. A fainted Pokemon has no field
+    /// position, so its target renders as the side form `p1: Name`; a Round that an earlier
+    /// Round prioritized carries `[from] move: Round`, and the second turn of a two-turn move
+    /// `[from] lockedmove` (the volatile that re-runs it).
+    fn log_move_line(&mut self, p: Pos, mv: &crate::dex::MoveData, target: Option<Pos>, am: &ActiveMove) {
+        if !self.cfg.log {
+            return;
+        }
+        let tname = match target {
+            Some(t) => self.move_target_text(t),
+            None => String::new(),
+        };
+        let from = if am.fx == MoveFx::Round && self.round_used {
+            "|[from] move: Round"
+        } else if self.m(p).vol.charging > 0 && self.m(p).vol.charging == am.mslot + 1 {
+            "|[from] lockedmove"
+        } else {
+            ""
+        };
+        self.log_lines.push(format!("|move|{}|{}|{}{}", self.name(p), mv.name, tname, from));
+        self.last_move_line = self.log_lines.len() - 1;
+    }
+
+    /// The move-line ident of a target: `p1a: Name`, or `p1: Name` for a fainted Pokemon.
+    fn move_target_text(&self, t: Pos) -> String {
+        let i = self.sides[t.s()].active[t.i()];
+        if i != crate::state::NO_MON {
+            let m = &self.sides[t.s()].mons[i as usize];
+            if m.fainted {
+                return format!("p{}: {}", t.side + 1, self.dex.sp(m.species).base_species);
+            }
+        }
+        self.name(t)
     }
 
     fn use_move_inner(&mut self, p: Pos, am: &mut ActiveMove, target: Option<Pos>, loc: i8) -> bool {
@@ -371,15 +423,10 @@ impl Battle {
             let _ = self.get_random_target(p, am.target);
             target = self.get_random_target(p, am.target);
         }
-        // addMove: `|move|user|Move|target[|[from] ...]`; attributes are appended later
-        // (attr_last_move). A Round that an earlier Round prioritized runs with sourceEffect Round.
-        if self.cfg.log {
-            let tname = target.map(|t| self.name(t)).unwrap_or_default();
-            let from = if am.fx == MoveFx::Round && self.round_used { "|[from] move: Round" } else { "" };
-            self.log_lines.push(format!("|move|{}|{}|{}{}", self.name(p), mv.name, tname, from));
-            self.last_move_line = self.log_lines.len() - 1;
-        }
+        // addMove: `|move|user|Move|target[|[from] ...]`; written after getMoveTargets (below)
+        // so a redirection shows; attributes are appended later (attr_last_move).
         let Some(target) = target else {
+            self.log_move_line(p, mv, None, am);
             self.attr_last_move("[notarget]");
             blog!(self, "|-fail|{}", self.name(p));
             return false;
@@ -393,6 +440,15 @@ impl Battle {
         if n == 2 && mv.smart_target {
             am.smart_target = true;
         }
+        // Pinned writes the move line with the ModifyTarget result: a redirected single target
+        // (Follow Me, Lightning Rod...), otherwise the target as chosen (spread moves name the
+        // chosen one, a fainted one keeps its side form).
+        let log_target = if matches!(am.target, Target::Normal | Target::Any | Target::AdjacentFoe | Target::RandomNormal | Target::Scripted) {
+            self.redirect(p, am, target, true).0
+        } else {
+            target
+        };
+        self.log_move_line(p, mv, Some(log_target), am);
         // Pressure: one extra PP per opposing Pressure Pokemon targeted.
         // Showdown skips the DeductPP event when sourceEffect is set: a locked
         // (two-turn strike) execution does not charge Pressure's extra PP.
@@ -431,6 +487,11 @@ impl Battle {
             }
             self.protean(p, am);
             let ok = self.field_move(p, am);
+            if !ok {
+                // Pinned did-nothing path: a failed field move fails loudly.
+                blog!(self, "|-fail|{}", self.name(p));
+                self.attr_last_move("[still]");
+            }
             self.after_move(p, am, &[], ok, 0);
             return ok;
         }
@@ -446,8 +507,17 @@ impl Battle {
         }
         // onTry / PrepareHit (move-specific failure conditions).
         if !self.move_try(p, am, &targets[..n]) {
-            blog!(self, "|-fail|{}", self.name(p));
-            self.attr_last_move("[still]");
+            match am.fx {
+                // Pinned substitute.onTryHit messages; the move line keeps its target.
+                MoveFx::Substitute => {
+                    let has = self.m(p).vol.substitute > 0;
+                    blog!(self, "|-fail|{}|move: Substitute{}", self.name(p), if has { "" } else { "|[weak]" });
+                }
+                _ => {
+                    blog!(self, "|-fail|{}", self.name(p));
+                    self.attr_last_move("[still]");
+                }
+            }
             self.after_move_fail(p, am);
             return false;
         }
@@ -480,10 +550,13 @@ impl Battle {
             return;
         }
         self.reveal_ability(p);
+        let aname = self.dex.ability(self.m(p).ability).name.clone();
         let m = self.mm(p);
         m.types = [am.ty, Type::None];
         m.vol.type_changed = true;
         m.vol.protean = true;
+        // Pinned protean onPrepareHit: `-start ... typechange|TYPE|[from] ability: ...`.
+        blog!(self, "|-start|{}|typechange|{}|[from] ability: {}", self.name(p), am.ty.name(), aname);
     }
 
     /// Pressure (onDeductPP): an extra PP for each opposing Pressure Pokemon
@@ -592,7 +665,7 @@ impl Battle {
                 // RedirectTarget handlers only take targets valid for the move (validTarget).
                 let mut redirected = false;
                 if matches!(am.target, Target::Normal | Target::Any | Target::AdjacentFoe | Target::RandomNormal | Target::Scripted) {
-                    (t, redirected) = self.redirect(p, am, t);
+                    (t, redirected) = self.redirect(p, am, t, false);
                 }
                 // getSmartTargets (Dragon Darts): the target's live adjacent ally joins; a
                 // fainted target leaves only the ally; no usable ally drops smartTarget, and
@@ -634,7 +707,7 @@ impl Battle {
     /// also for moves aimed at the user's own ally), then Lightning Rod /
     /// Storm Drain of any other Pokemon (priority 0). Also returns whether a handler
     /// fired (each of them then turns smartTarget off, target changed or not).
-    fn redirect(&mut self, p: Pos, am: &ActiveMove, t: Pos) -> (Pos, bool) {
+    fn redirect(&mut self, p: Pos, am: &ActiveMove, t: Pos, announce: bool) -> (Pos, bool) {
         if matches!(self.ab(p), Ab::Stalwart) || self.dex.mv(am.id).tracks_target {
             return (t, false);
         }
@@ -683,6 +756,11 @@ impl Battle {
         if let Some((_, q)) = best {
             if q != t {
                 self.reveal_ability(q);
+                if announce {
+                    // Pinned lightningrod/stormdrain onAnyRedirectTarget.
+                    let aname = if absorber == Ab::LightningRod { "Lightning Rod" } else { "Storm Drain" };
+                    blog!(self, "|-activate|{}|ability: {}", self.name(q), aname);
+                }
             }
             return (q, true);
         }
@@ -722,6 +800,10 @@ impl Battle {
             self.boost(p, &ups(B_SPA, 1), BoostSrc::SelfInflicted);
         }
         if skip {
+            // Pinned onTryMove: `-prepare` is emitted even when the weather skips the
+            // charge; the still blanks the move line's target (the move still fires).
+            blog!(self, "|-prepare|{}|{}", self.name(p), self.dex.mv(am.id).name);
+            self.attr_last_move("[still]");
             return false;
         }
         // twoturnmove's onStart runs PrepareHit (Protean) on the charge turn.
@@ -730,7 +812,10 @@ impl Battle {
         m.vol.charging = am.mslot + 1;
         m.vol.charge_target = loc;
         m.vol.semi_inv = semi;
-        blog!(self, "|-prepare|{}|charge", self.name(p));
+        // Pinned twoturnmove: `-prepare` names the move; the move line loses its target
+        // (attrLastMove('[still]')).
+        blog!(self, "|-prepare|{}|{}", self.name(p), self.dex.mv(am.id).name);
+        self.attr_last_move("[still]");
         true
     }
 
@@ -988,7 +1073,7 @@ impl Battle {
                         blog!(self, "|-fieldend|move: Trick Room");
                     } else {
                         self.field.trick_room = 5;
-                        blog!(self, "|-fieldstart|move: Trick Room");
+                        blog!(self, "|-fieldstart|move: Trick Room|[of] {}", self.name(p));
                     }
                     ok = true;
                 }
@@ -1023,6 +1108,7 @@ impl Battle {
             MoveFx::PerishSong => {
                 // onHitField: per active Pokemon, Invulnerability, then TryHit
                 // (Soundproof, Good as Gold, Psychic Terrain vs. priority).
+                let mut message = false;
                 for &q in &self.live_positions().collect::<crate::fixed::FixedVec<_, 4>>() {
                     let si = self.m(q).vol.semi_inv;
                     if q != p && si != SemiInv::None && self.ab(p) != Ab::NoGuard && self.tab(q) != Ab::NoGuard {
@@ -1043,8 +1129,14 @@ impl Battle {
                     }
                     if self.m(q).vol.perish == 0 {
                         self.mm(q).vol.perish = 4;
+                        // Pinned onHitField: the silent counter start for each new target.
+                        blog!(self, "|-start|{}|perish3|[silent]", self.name(q));
                         ok = true;
+                        message = true;
                     }
+                }
+                if message {
+                    blog!(self, "|-fieldactivate|move: Perish Song");
                 }
             }
             // Stealth Rock / Toxic Spikes lay their layer through `side_condition` above (the
@@ -1083,6 +1175,7 @@ impl Battle {
                     return false;
                 }
                 c.reflect = screen_turns;
+                blog!(self, "|-sidestart|p{}: p{}|Reflect", side + 1, side + 1);
                 true
             }
             SideCond::LightScreen => {
@@ -1090,6 +1183,7 @@ impl Battle {
                     return false;
                 }
                 c.light_screen = screen_turns;
+                blog!(self, "|-sidestart|p{}: p{}|move: Light Screen", side + 1, side + 1);
                 true
             }
             SideCond::AuroraVeil => {
@@ -1097,6 +1191,7 @@ impl Battle {
                     return false;
                 }
                 c.aurora_veil = screen_turns;
+                blog!(self, "|-sidestart|p{}: p{}|move: Aurora Veil", side + 1, side + 1);
                 true
             }
             SideCond::Safeguard => {
@@ -1104,6 +1199,7 @@ impl Battle {
                     return false;
                 }
                 c.safeguard = 5;
+                blog!(self, "|-sidestart|p{}: p{}|Safeguard", side + 1, side + 1);
                 true
             }
             SideCond::Mist => {
@@ -1111,6 +1207,7 @@ impl Battle {
                     return false;
                 }
                 c.mist = 5;
+                blog!(self, "|-sidestart|p{}: p{}|Mist", side + 1, side + 1);
                 true
             }
             SideCond::WideGuard | SideCond::QuickGuard => {
@@ -1245,20 +1342,16 @@ impl Battle {
                 }
             }
         }
-        // trySpreadMoveHit: `[spread] p1a,p2b` names the targets still hit after the steps.
-        if am.spread_hit && self.cfg.log {
-            let slots: Vec<String> = (0..n)
-                .filter(|&i| res[i] == Hit::Pending)
-                .map(|i| format!("p{}{}", tg[i].side + 1, if tg[i].slot == 0 { 'a' } else { 'b' }))
-                .collect();
-            self.attr_last_move(&format!("[spread] {}", slots.join(",")));
-        }
         let live: crate::fixed::FixedVec<Pos, 4> = (0..n).filter(|&i| res[i] == Hit::Pending).map(|i| tg[i]).collect();
         let any_fail = (0..n).any(|i| res[i] == Hit::Failed);
         if any_fail {
             am.smart_target = false;
         }
         if live.is_empty() {
+            // Pinned still writes `[spread]` (an empty list).
+            if am.spread_hit && self.cfg.log {
+                self.attr_last_move("[spread] ");
+            }
             // Protect-style blocks (NotFail) still count as "did nothing".
             let _ = any_fail;
             return false;
@@ -1271,7 +1364,15 @@ impl Battle {
             c.light_screen = 0;
             c.aurora_veil = 0;
         }
-        self.move_hit_loop(p, am, &live);
+        let hit_mask = self.move_hit_loop(p, am, &live);
+        // trySpreadMoveHit: `[spread] p1a,p2b` names the targets actually hit.
+        if am.spread_hit && self.cfg.log {
+            let slots: Vec<String> = (0..live.len())
+                .filter(|&i| hit_mask[i])
+                .map(|i| format!("p{}{}", live[i].side + 1, if live[i].slot == 0 { 'a' } else { 'b' }))
+                .collect();
+            self.attr_last_move(&format!("[spread] {}", slots.join(",")));
+        }
         true
     }
 
@@ -1367,7 +1468,7 @@ impl Battle {
             if self.is_live(p) {
                 let mut tgt = p;
                 if matches!(bounced.target, Target::Normal | Target::Any | Target::AdjacentFoe | Target::RandomNormal | Target::Scripted) {
-                    tgt = self.redirect(t, &bounced, p).0;
+                    tgt = self.redirect(t, &bounced, p, false).0;
                 }
                 self.try_spread_move_hit(t, &mut bounced, &[tgt]);
             }
@@ -1508,7 +1609,7 @@ impl Battle {
 
     // ---- the hit loop ---------------------------------------------------------------------
 
-    fn move_hit_loop(&mut self, p: Pos, am: &mut ActiveMove, targets: &[Pos]) {
+    fn move_hit_loop(&mut self, p: Pos, am: &mut ActiveMove, targets: &[Pos]) -> [bool; MAX_TARGETS] {
         let mv = self.dex.mv(am.id);
         let n = targets.len();
         // Number of hits.
@@ -1553,6 +1654,8 @@ impl Battle {
         let mut hit_no = 0u8;
         let mut self_dropped = false;
         let mut status_hit = false;
+        // The targets the move actually did something to (trySpreadMoveHit's `[spread]`).
+        let mut hit_mask = [false; MAX_TARGETS];
         // Dragon Darts with both targets left: hit 1 goes to the first, hit 2 to the second;
         // its moveDamage accumulates over the hits, so hit 2 only ends the loop when hit 1
         // failed too.
@@ -1603,6 +1706,18 @@ impl Battle {
             }
             if (0..n).any(|i| status_ok[i]) {
                 status_hit = true;
+            }
+            // Pinned hitStepMoveHitLoop: hit 1 with every target failed (`false`) prunes
+            // the whole list; otherwise every live target stays (a failed effect reads
+            // as a 0, which trySpreadMoveHit's filter keeps).
+            if h == 1 {
+                if (0..n).all(|i| dmg[i].is_none() && !status_ok[i]) {
+                    hit_mask = [false; MAX_TARGETS];
+                } else {
+                    for i in 0..n {
+                        hit_mask[i] = true;
+                    }
+                }
             }
             for i in 0..n {
                 if let Some(d) = dmg[i] {
@@ -1658,6 +1773,7 @@ impl Battle {
         // After-move-secondary: Eject Button, Red Card, Emergency Exit.
         self.after_move_secondary(p, am, targets, &damaged, &hp_before, total);
         self.after_move(p, am, targets, any_hit || am.category == Category::Status, total);
+        hit_mask
     }
 
     /// One hit against all remaining targets. Returns damage dealt per target.
@@ -1741,6 +1857,9 @@ impl Battle {
                 self.mm(t).vol.substitute -= absorbed as u16;
                 if self.m(t).vol.substitute == 0 {
                     blog!(self, "|-end|{}|Substitute", self.name(t));
+                } else {
+                    // Pinned substitute.onTryPrimaryHit: a hit the substitute survives.
+                    blog!(self, "|-activate|{}|move: Substitute|[damage]", self.name(t));
                 }
                 // The substitute's onTryPrimaryHit applies recoil and drain
                 // (rounded up) for the damage it took, right away.
@@ -1800,6 +1919,14 @@ impl Battle {
             }
             if out[i].is_none() {
                 continue;
+            }
+            if am.fx == MoveFx::Poltergeist {
+                // Pinned poltergeist.onTryHit (after accuracy): names the target's item.
+                let it = self.m(t).item;
+                if it != 0 {
+                    let iname = self.dex.item(it).name.clone();
+                    blog!(self, "|-activate|{}|move: Poltergeist|{}", self.name(t), iname);
+                }
             }
             self.damaging_move_effects(p, t, am, out[i].unwrap_or(0), sub_hit[i]);
         }
@@ -1931,6 +2058,9 @@ impl Battle {
             // Move-level volatile on damaging moves (Infestation, Whirlpool...).
             if let Some(v) = mv.volatile {
                 if mv.category != Category::Status && self.is_live(t) {
+                    if v == VolKind::PartiallyTrapped && self.m(t).vol.partial_trap == 0 {
+                        self.mm(t).vol.partial_trap_move = am.id;
+                    }
                     self.add_volatile(t, v, Some(p));
                 }
             }
@@ -1991,7 +2121,8 @@ impl Battle {
         match am.fx {
             MoveFx::KnockOff if !sub_hit => {
                 if self.m(t).item != 0 && !self.dex.item(self.m(t).item).is_mega_stone {
-                    blog!(self, "|-enditem|{}|knocked off", self.name(t));
+                    let iname = self.dex.item(self.m(t).item).name.clone();
+                    blog!(self, "|-enditem|{}|{}|[from] move: Knock Off|[of] {}", self.name(t), iname, self.name(p));
                     self.mm(t).item_knocked = true;
                     self.remove_item(t);
                 }
@@ -2029,10 +2160,21 @@ impl Battle {
     }
 
     /// Effects of a status move (or Pollen Puff on an ally) on one target.
+    /// Pinned did-nothing path: the move failed on the spot (`-fail` on the user, and
+    /// `[still]` on the move line).
+    fn did_nothing(&mut self, p: Pos) -> bool {
+        blog!(self, "|-fail|{}", self.name(p));
+        self.attr_last_move("[still]");
+        false
+    }
+
     pub(crate) fn status_move_effects(&mut self, p: Pos, t: Pos, am: &ActiveMove) -> bool {
         let mv = self.dex.mv(am.id);
         let mut ok = false;
-        let from = if t == p { BoostSrc::SelfInflicted } else { BoostSrc::Move(p) };
+        // Pinned runMoveEffects: a null per-target result (a zero-delta boost, a failed
+        // setStatus) suppresses the move-level fail.
+        let mut null_result = false;
+        let from = BoostSrc::Move(p);
         match am.fx {
             MoveFx::Protect | MoveFx::Detect | MoveFx::SpikyShield | MoveFx::BanefulBunker | MoveFx::KingsShield | MoveFx::SilkTrap | MoveFx::BurningBulwark => {
                 let k = match am.fx {
@@ -2107,15 +2249,18 @@ impl Battle {
             }
             MoveFx::Encore => {
                 if self.aroma_veil(t) {
+                    return self.did_nothing(p);
+                }
+                if !self.is_live(t) {
                     return false;
                 }
-                if !self.is_live(t) || self.m(t).vol.encore > 0 {
-                    return false;
+                if self.m(t).vol.encore > 0 {
+                    return self.did_nothing(p);
                 }
                 let last = self.m(t).vol.last_move;
-                let Some(slot) = self.m(t).move_slot(last) else { return false };
+                let Some(slot) = self.m(t).move_slot(last) else { return self.did_nothing(p) };
                 if last == 0 || self.m(t).pp[slot] == 0 || self.dex.mv(last).flags & flag::FAILENCORE != 0 {
-                    return false;
+                    return self.did_nothing(p);
                 }
                 let mut dur = 3;
                 // Champions: change the queued action to the encored move.
@@ -2133,6 +2278,8 @@ impl Battle {
                 let m = self.mm(t);
                 m.vol.encore = dur;
                 m.vol.encore_slot = slot as u8;
+                // Pinned encore condition onStart.
+                blog!(self, "|-start|{}|Encore", self.name(t));
                 if self.it(t) == It::MentalHerb {
                     self.mm(t).vol.encore = 0;
                     self.consume_item(t);
@@ -2141,13 +2288,16 @@ impl Battle {
             }
             MoveFx::Disable => {
                 if self.aroma_veil(t) {
+                    return self.did_nothing(p);
+                }
+                if !self.is_live(t) {
                     return false;
                 }
-                if !self.is_live(t) || self.m(t).vol.disable > 0 {
-                    return false;
+                if self.m(t).vol.disable > 0 {
+                    return self.did_nothing(p);
                 }
                 let last = self.m(t).vol.last_move;
-                let Some(slot) = self.m(t).move_slot(last) else { return false };
+                let Some(slot) = self.m(t).move_slot(last) else { return self.did_nothing(p) };
                 let mut d = 4;
                 if self.queue.will_move(t).is_none() {
                     d += 1;
@@ -2155,6 +2305,8 @@ impl Battle {
                 let m = self.mm(t);
                 m.vol.disable = d;
                 m.vol.disable_slot = slot as u8;
+                // Pinned disable condition onStart: the disabled move's name.
+                blog!(self, "|-start|{}|Disable|{}", self.name(t), self.dex.mv(last).name);
                 if self.it(t) == It::MentalHerb {
                     self.mm(t).vol.disable = 0;
                     self.consume_item(t);
@@ -2182,18 +2334,26 @@ impl Battle {
                 self.instruct_action(t, slot, last, loc);
                 return true;
             }
-            MoveFx::Taunt => return self.add_volatile(t, VolKind::Taunt, Some(p)),
-            MoveFx::Imprison => return self.add_volatile(p, VolKind::Imprison, Some(p)),
-            MoveFx::Yawn => return self.add_volatile(t, VolKind::Yawn, Some(p)),
-            MoveFx::LeechSeed => return self.add_volatile(t, VolKind::LeechSeed, Some(p)),
+            MoveFx::Taunt => return if self.add_volatile(t, VolKind::Taunt, Some(p)) { true } else { self.did_nothing(p) },
+            MoveFx::Imprison => return if self.add_volatile(p, VolKind::Imprison, Some(p)) { true } else { self.did_nothing(p) },
+            MoveFx::Yawn => return if self.add_volatile(t, VolKind::Yawn, Some(p)) { true } else { self.did_nothing(p) },
+            MoveFx::LeechSeed => return if self.add_volatile(t, VolKind::LeechSeed, Some(p)) { true } else { self.did_nothing(p) },
             MoveFx::Substitute => {
                 let mh = self.m(p).max_hp as u32;
                 let cost = mh / 4;
                 self.damage(p, cost, Some(p), DmgKind::SelfCost);
+                // Pinned substitute onStart: the start line, and a silent end for the
+                // partial trap the substitute frees its user from.
+                let pm = self.m(p).vol.partial_trap_move;
+                let trapped = self.m(p).vol.partial_trap > 0 && pm != 0;
+                let mvname = if pm != 0 { self.dex.mv(pm).name.clone() } else { String::new() };
                 let m = self.mm(p);
                 m.vol.substitute = cost as u16;
-                // The substitute frees its user from a partial trap.
                 m.vol.partial_trap = 0;
+                blog!(self, "|-start|{}|Substitute", self.name(p));
+                if trapped {
+                    blog!(self, "|-end|{}|{}|[partiallytrapped]|[silent]", self.name(p), mvname);
+                }
                 return true;
             }
             MoveFx::ShedTail => {
@@ -2242,13 +2402,18 @@ impl Battle {
                 return true;
             }
             MoveFx::Roost => {
-                // At full HP the heal fails and so does the move (no Roost volatile).
+                // At full HP the heal fails (pinned heal-fail message, [still], no move fail).
                 let mh = self.m(p).max_hp as u32;
                 let h = self.heal(p, (mh + 1) / 2);
-                if h > 0 {
-                    self.mm(p).vol.roost = true;
+                if h == 0 {
+                    blog!(self, "|-fail|{}|heal", self.name(p));
+                    self.attr_last_move("[still]");
+                    return false;
                 }
-                return h > 0;
+                self.mm(p).vol.roost = true;
+                // Pinned roost condition onStart.
+                blog!(self, "|-singleturn|{}|move: Roost", self.name(p));
+                return true;
             }
             // Pinned simplebeam: onTryHit refuses a cantsuppress, Simple or Truant target (the
             // move's own TryHit runs in the hit loop, after accuracy); onHit setAbility('simple').
@@ -2262,9 +2427,11 @@ impl Battle {
                     || ab == simple
                     || self.dex.ability_id("truant").is_some_and(|tr| ab == tr)
                 {
-                    return false;
+                    return self.did_nothing(p);
                 }
                 self.replace_ability(t, simple);
+                // Pinned Pokemon.setAbility: `-ability|t|new|old|[from] move: Simple Beam`.
+                blog!(self, "|-ability|{}|Simple|{}|[from] move: Simple Beam", self.name(t), self.dex.ability(ab).name);
                 return true;
             }
             // Pinned magicpowder.onHit: a pure Psychic target fails; otherwise setType('Psychic').
@@ -2348,7 +2515,15 @@ impl Battle {
                 }
                 // setAbility: End of the old ability, Start of the new one, then the Update
                 // cures (Worry Seed's Insomnia wakes the target there).
+                let old = self.m(t).ability;
                 self.replace_ability(t, new);
+                // Pinned Pokemon.setAbility: `-ability|t|new|old|[from] move: X`, with the
+                // user named for Entrainment.
+                if am.fx == MoveFx::WorrySeed {
+                    blog!(self, "|-ability|{}|{}|{}|[from] move: Worry Seed", self.name(t), self.dex.ability(new).name, self.dex.ability(old).name);
+                } else {
+                    blog!(self, "|-ability|{}|{}|{}|[from] move: Entrainment|[of] {}", self.name(t), self.dex.ability(new).name, self.dex.ability(old).name, self.name(p));
+                }
                 return true;
             }
             MoveFx::StrengthSap => {
@@ -2373,7 +2548,8 @@ impl Battle {
                 } else {
                     (mh + 1) / 2
                 };
-                // A heal that does nothing returns NOT_FAIL: the move did not fail.
+                // A heal that does nothing returns NOT_FAIL: no [still], and the move line
+                // keeps its target (pinned healpulse.onHit).
                 if self.heal(t, amt) == 0 {
                     blog!(self, "|-fail|{}|heal", self.name(t));
                 }
@@ -2390,11 +2566,14 @@ impl Battle {
                 if !self.is_live(t) {
                     return false;
                 }
-                let avg = (self.m(p).hp as u32 + self.m(t).hp as u32) / 2;
+                let avg = ((self.m(p).hp as u32 + self.m(t).hp as u32) / 2).max(1);
                 for q in [p, t] {
                     let m = self.mm(q);
                     m.hp = (avg as u16).min(m.max_hp);
                 }
+                // Pinned onHit: the target's line is silent, the user's is not.
+                blog!(self, "|-sethp|{}|{}|[from] move: Pain Split|[silent]", self.name(t), self.hp_text(t));
+                blog!(self, "|-sethp|{}|{}|[from] move: Pain Split", self.name(p), self.hp_text(p));
                 return true;
             }
             MoveFx::BellyDrum => {
@@ -2406,7 +2585,7 @@ impl Battle {
             MoveFx::ClangorousSoul => {
                 // onTryHit boosts first (no boost: the move fails), then onHit pays
                 // trunc(maxhp * 33 / 100).
-                if !self.boost(p, &[1, 1, 1, 1, 1, 0, 0], BoostSrc::SelfInflicted) {
+                if !self.boost(p, &[1, 1, 1, 1, 1, 0, 0], BoostSrc::Move(p)) {
                     return false;
                 }
                 let mh = self.m(p).max_hp as u32;
@@ -2414,7 +2593,7 @@ impl Battle {
                 return true;
             }
             MoveFx::NoRetreat => {
-                self.boost(p, &[1, 1, 1, 1, 1, 0, 0], BoostSrc::SelfInflicted);
+                self.boost(p, &[1, 1, 1, 1, 1, 0, 0], BoostSrc::Move(p));
                 self.mm(p).vol.no_retreat = true;
                 return true;
             }
@@ -2426,12 +2605,12 @@ impl Battle {
                     c.toxic_spikes = 0;
                     c.sticky_web = false;
                 }
-                self.boost(p, &[1, 0, 0, 0, 1, 0, 0], BoostSrc::SelfInflicted);
+                self.boost(p, &[1, 0, 0, 0, 1, 0, 0], BoostSrc::Move(p));
                 return true;
             }
             MoveFx::Growth => {
                 let n = if self.user_weather(p) == Weather::Sun { 2 } else { 1 };
-                return self.boost(p, &[n, 0, n, 0, 0, 0, 0], BoostSrc::SelfInflicted);
+                return self.boost(p, &[n, 0, n, 0, 0, 0, 0], BoostSrc::Move(p));
             }
             MoveFx::Acupressure => {
                 let m = self.m(t);
@@ -2440,7 +2619,7 @@ impl Battle {
                     return false;
                 }
                 let i = opts[self.rng.below(opts.len() as u32) as usize];
-                return self.boost(t, &ups(i, 2), BoostSrc::SelfInflicted);
+                return self.boost(t, &ups(i, 2), BoostSrc::Move(p));
             }
             MoveFx::PsychUp => {
                 if !self.is_live(t) {
@@ -2451,6 +2630,7 @@ impl Battle {
                 let m = self.mm(p);
                 m.boosts = b;
                 m.vol.crit_stage = cs;
+                blog!(self, "|-copyboost|{}|{}|[from] move: Psych Up", self.name(p), self.name(t));
                 return true;
             }
             MoveFx::TopsyTurvy => {
@@ -2541,6 +2721,8 @@ impl Battle {
                 self.damage(p, mh / 2, Some(p), DmgKind::SelfCost);
                 if self.is_live(t) {
                     self.mm(t).vol.curse = true;
+                    // Pinned curse condition onStart.
+                    blog!(self, "|-start|{}|Curse|[of] {}", self.name(t), self.name(p));
                     return true;
                 }
                 return false;
@@ -2556,6 +2738,7 @@ impl Battle {
                         // Quash: order 201, after every other move.
                         a.order = 201;
                         self.queue.list[i] = Some(a);
+                        blog!(self, "|-activate|{}|move: Quash", self.name(t));
                     }
                     return true;
                 }
@@ -2594,11 +2777,32 @@ impl Battle {
         // Generic status-move data.
         if let Some(b) = mv.boosts {
             if self.is_live(t) {
-                ok |= self.boost(t, &b, from);
+                if self.boost(t, &b, from) {
+                    ok = true;
+                } else {
+                    null_result = true;
+                }
             }
         }
         if mv.status != Status::None && self.is_live(t) {
-            ok |= self.try_set_status_from(t, mv.status, Some(p), StatusFrom::Move(am.id));
+            // Pinned Pokemon.setStatus on a statused target: re-applying the move's own status
+            // names the target, another status fails on the user with [still]; the target then
+            // counts as failed (runMoveEffects `continue`s) without the did-nothing fail.
+            let existing = self.m(t).status;
+            if existing == mv.status {
+                blog!(self, "|-fail|{}|{}", self.name(t), mv.status.id());
+                return false;
+            }
+            if existing != Status::None {
+                blog!(self, "|-fail|{}", self.name(p));
+                self.attr_last_move("[still]");
+                return false;
+            }
+            if !self.try_set_status_from(t, mv.status, Some(p), StatusFrom::Move(am.id)) {
+                // Pinned runMoveEffects: a failed setStatus feeds null (no fail, no [still]).
+                return false;
+            }
+            ok = true;
         }
         if let Some(v) = mv.volatile {
             if self.is_live(t) {
@@ -2606,12 +2810,23 @@ impl Battle {
             }
         }
         if mv.heal.0 > 0 && self.is_live(t) {
+            if self.m(t).hp >= self.m(t).max_hp {
+                // Pinned runMoveEffects: a full-HP target fails the heal with its own message
+                // and [still], not the move-level fail.
+                blog!(self, "|-fail|{}|heal", self.name(t));
+                self.attr_last_move("[still]");
+                return false;
+            }
             let mh = self.m(t).max_hp as u32;
             let amt = ((mh as f64) * mv.heal.0 as f64 / mv.heal.1 as f64).round() as u32;
             ok |= self.heal(t, amt) > 0;
         }
         if let Some(b) = mv.self_boosts {
-            ok |= self.boost(p, &b, BoostSrc::SelfInflicted);
+            if self.boost(p, &b, BoostSrc::Move(p)) {
+                ok = true;
+            } else {
+                null_result = true;
+            }
         }
         if mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
             let m = self.mm(p);
@@ -2624,8 +2839,9 @@ impl Battle {
             self.mm(t).vol.force_switch = true;
             ok = true;
         }
-        if !ok {
-            blog!(self, "|-fail|{}", self.name(p));
+        if !ok && !null_result {
+            // Pinned did-nothing path: the fail, and [still] on the move line.
+            self.did_nothing(p);
         }
         ok
     }
@@ -2700,22 +2916,26 @@ impl Battle {
             }
             if sec.scripted {
                 match am.fx {
+                    // Pinned scripted secondaries call setStatus(status, source) without the
+                    // move as sourceEffect: no `[from] move:` tag.
                     MoveFx::DireClaw => {
                         let st = [Status::Psn, Status::Par, Status::Slp][self.rng.below(3) as usize];
-                        self.try_set_status_from(t, st, Some(p), StatusFrom::Move(am.id));
+                        self.try_set_status(t, st, Some(p));
                     }
                     MoveFx::TriAttack => {
                         let st = [Status::Par, Status::Brn, Status::Frz][self.rng.below(3) as usize];
-                        self.try_set_status_from(t, st, Some(p), StatusFrom::Move(am.id));
+                        self.try_set_status(t, st, Some(p));
                     }
                     MoveFx::ThroatChop => {
                         if self.m(t).vol.throat_chop == 0 {
                             self.mm(t).vol.throat_chop = 2;
+                            // Pinned throatchop condition onStart (silent).
+                            blog!(self, "|-start|{}|Throat Chop|[silent]", self.name(t));
                         }
                     }
                     MoveFx::BurningJealousy => {
                         if self.m(t).vol.stats_raised_this_turn {
-                            self.try_set_status_from(t, Status::Brn, Some(p), StatusFrom::Move(am.id));
+                            self.try_set_status(t, Status::Brn, Some(p));
                         }
                     }
                     MoveFx::AlluringVoice => {
@@ -2741,7 +2961,7 @@ impl Battle {
                 }
             }
             if let Some(b) = sec.boosts {
-                self.boost(t, &b, BoostSrc::Move(p));
+                self.boost(t, &b, BoostSrc::SecMove(p));
             }
         }
         if kings_rock && !shielded && self.rng.below(100) < 10 && self.is_live(t) && !sub_hit {
@@ -2767,9 +2987,12 @@ impl Battle {
             blog!(self, "|-enditem|{}|Air Balloon", self.name(t));
             self.consume_item(t);
         }
-        // Illusion's onDamagingHit: a hit reveals the holder (pinned `End`).
+        // Illusion's onDamagingHit: a hit reveals the holder (pinned `End`): `replace` with the
+        // real details, then the condition end.
         if self.m(t).vol.illusion_species != 0 {
             self.mm(t).vol.illusion_species = 0;
+            blog!(self, "|replace|{}|{}", self.name(t), self.details(t));
+            blog!(self, "|-end|{}|Illusion", self.name(t));
         }
         // The target's onDamagingHit runs even when the hit knocked it out
         // (it faints only after the move).
@@ -2777,17 +3000,25 @@ impl Battle {
         if self.is_live(t) {
             match tab {
                 Ab::Stamina => {
-                    self.reveal_ability(t);
-                    self.boost(t, &ups(B_DEF, 1), BoostSrc::SelfInflicted);
+                    if self.boost(t, &ups(B_DEF, 1), BoostSrc::SelfInflicted) {
+                        self.reveal_ability(t);
+                        blog!(self, "|-ability|{}|Stamina|boost", self.name(t));
+                    }
                 }
                 Ab::Justified if am.ty == Type::Dark => {
-                    self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted);
+                    if self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                        blog!(self, "|-ability|{}|Justified|boost", self.name(t));
+                    }
                 }
                 Ab::ThermalExchange if am.ty == Type::Fire => {
-                    self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted);
+                    if self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                        blog!(self, "|-ability|{}|Thermal Exchange|boost", self.name(t));
+                    }
                 }
                 Ab::WeakArmor if am.category == Category::Physical => {
-                    self.boost(t, &[0, -1, 0, 0, 2, 0, 0], BoostSrc::SelfInflicted);
+                    if self.boost(t, &[0, -1, 0, 0, 2, 0, 0], BoostSrc::SelfInflicted) {
+                        blog!(self, "|-ability|{}|Weak Armor|boost", self.name(t));
+                    }
                 }
                 Ab::Electromorphosis => self.mm(t).vol.charge = true,
                 Ab::Berserk => {
@@ -2838,6 +3069,9 @@ impl Battle {
                         let m = self.mm(p);
                         m.vol.disable = 4;
                         m.vol.disable_slot = slot as u8;
+                        // Pinned disable onStart from the ability: the move, `[from]` and `[of]`.
+                        let dname = self.dex.mv(self.m(p).vol.last_move).name.clone();
+                        blog!(self, "|-start|{}|Disable|{}|[from] ability: Cursed Body|[of] {}", self.name(p), dname, self.name(t));
                     }
                 }
             }
@@ -2847,11 +3081,19 @@ impl Battle {
                 let c = &mut self.sides[side].conds;
                 if c.toxic_spikes < 2 {
                     c.toxic_spikes += 1;
+                    blog!(self, "|-activate|{}|ability: Toxic Debris", self.name(t));
+                    blog!(self, "|-sidestart|p{}: p{}|move: Toxic Spikes", side + 1, side + 1);
                 }
             }
             Ab::CuteCharm if contact && self.rng.chance(3, 10) => {
                 if self.is_live(p) {
-                    self.add_volatile(p, VolKind::Attract, Some(t));
+                    // Pinned attract: a fresh infatuation is a -start naming Cute Charm; one
+                    // already in place takes the onRestart -activate.
+                    if self.m(p).vol.attract {
+                        blog!(self, "|-activate|{}|move: Attract|[of] {}", self.name(p), self.name(t));
+                    } else if self.add_volatile(p, VolKind::Attract, Some(t)) {
+                        blog!(self, "|-start|{}|Attract|[from] ability: Cute Charm|[of] {}", self.name(p), self.name(t));
+                    }
                 }
             }
             _ => {}
@@ -3021,12 +3263,16 @@ impl Battle {
         if kos > 0 && self.is_live(p) {
             match self.ab(p) {
                 Ab::Moxie => {
-                    self.boost(p, &ups(B_ATK, kos), BoostSrc::SelfInflicted);
+                    if self.boost(p, &ups(B_ATK, kos), BoostSrc::SelfInflicted) {
+                        blog!(self, "|-ability|{}|Moxie|boost", self.name(p));
+                    }
                 }
                 Ab::Eelevate => {
                     let m = self.m(p);
                     let best = (1..6).max_by_key(|&i| m.stats[i]).unwrap_or(1);
-                    self.boost(p, &ups(best - 1, kos), BoostSrc::SelfInflicted);
+                    if self.boost(p, &ups(best - 1, kos), BoostSrc::SelfInflicted) {
+                        blog!(self, "|-ability|{}|Eelevate|boost", self.name(p));
+                    }
                 }
                 _ => {}
             }

@@ -16,8 +16,9 @@ const NO_TRACE: &[&str] = &[
 ];
 
 impl Battle {
-    /// Replace the Pokemon at `p` with team member `to` (no entry effects).
-    pub fn switch_out_in(&mut self, p: Pos, to: usize) {
+    /// Replace the Pokemon at `p` with team member `to` (no entry effects). `drag`: a forced
+    /// switch (Roar, Red Card...), which pinned writes as `|drag|` with no `[from]`.
+    pub fn switch_out_in(&mut self, p: Pos, to: usize, drag: bool) {
         let s = p.s();
         let old = self.sides[s].active[p.i()];
         // A self-switch move names itself in the switch line (pinned switchIn's sourceEffect);
@@ -30,6 +31,8 @@ impl Battle {
             if alive {
                 // Switch-out abilities.
                 let ab = self.dex.ab(self.sides[s].mons[oi].ability);
+                let regen_ident = self.name(p);
+                let mut regen_line: Option<String> = None;
                 {
                     let m = &mut self.sides[s].mons[oi];
                     match ab {
@@ -37,6 +40,10 @@ impl Battle {
                             let h = (m.max_hp / 3).min(m.max_hp - m.hp);
                             if m.vol.heal_block == 0 {
                                 m.hp += h;
+                                if h > 0 {
+                                    // Pinned champions regenerator: a silent heal line.
+                                    regen_line = Some(format!("|-heal|{}|{}|[from] ability: Regenerator|[silent]", regen_ident, Self::hp_text_mon(m)));
+                                }
                             }
                         }
                         Ab::NaturalCure => {
@@ -50,6 +57,9 @@ impl Battle {
                         }
                         _ => {}
                     }
+                }
+                if let Some(l) = regen_line {
+                    blog!(self, "{}", l);
                 }
                 // The ability's End (Air Lock / Cloud Nine: eachEvent('WeatherChange')) while
                 // the Pokemon is still in.
@@ -118,7 +128,9 @@ impl Battle {
             let pick = self.illusion_target(p.s(), p.i());
             self.mm(p).vol.illusion_species = pick;
         }
-        if from_move != 0 {
+        if drag {
+            blog!(self, "|drag|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
+        } else if from_move != 0 {
             blog!(self, "|switch|{}|{}|{}|[from] {}", self.name(p), self.details(p), self.hp_text(p), self.dex.mv(from_move).name);
         } else {
             blog!(self, "|switch|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
@@ -236,7 +248,7 @@ impl Battle {
         // runSwitch happens at once.
         let old = self.sides[s].active[p.i()];
         self.queue.remove_where(|a| a.pos == p && a.mon == old);
-        self.switch_out_in(p, to);
+        self.switch_out_in(p, to, true);
         self.run_switch_in(&[p]);
     }
 
@@ -420,6 +432,8 @@ impl Battle {
                     self.reveal_ability(q);
                     self.mm(p).ability = new;
                     self.mm(p).vol.ability_changed = true;
+                    // Pinned trace onUpdate: `-ability|tracer|copied|Trace|[from] ability: Trace|[of] source`.
+                    blog!(self, "|-ability|{}|{}|Trace|[from] ability: Trace|[of] {}", self.name(p), self.dex.ability(new).name, self.name(q));
                     self.ability_start(p);
                 }
             }
@@ -441,8 +455,13 @@ impl Battle {
                 self.reveal_ability(p);
                 blog!(self, "|-ability|{}|Unnerve", self.name(p));
             }
-            Ab::Pressure | Ab::MoldBreaker => {
+            Ab::Pressure => {
                 self.reveal_ability(p);
+                blog!(self, "|-ability|{}|Pressure", self.name(p));
+            }
+            Ab::MoldBreaker => {
+                self.reveal_ability(p);
+                blog!(self, "|-ability|{}|Mold Breaker", self.name(p));
             }
             // onStart: eachEvent('WeatherChange') (also on its End).
             Ab::AirLock | Ab::CloudNine => {

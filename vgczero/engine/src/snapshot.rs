@@ -314,20 +314,25 @@ impl Battle {
         if bt.phase == Phase::Move && bt.queue.len > 0 {
             return Err("move phase with a non-empty queue".into());
         }
+        // Resolve the illusion sentinels (see load_mon): the scan reads the whole party.
+        for s in 0..2 {
+            for slot in 0..2 {
+                let i = bt.sides[s].active[slot];
+                if i != crate::state::NO_MON && bt.sides[s].mons[i as usize].vol.illusion_species == u16::MAX {
+                    let pick = bt.illusion_target(s, slot);
+                    bt.sides[s].mons[i as usize].vol.illusion_species = pick;
+                }
+            }
+        }
         Ok(bt)
     }
 
     fn load_mon(&mut self, sidx: usize, idx: usize, mv: &Value) -> R<()> {
         let d = dex();
-        // An active illusion is derived before the mutable borrow below: the dump only
-        // carries the flag, and the pinned rule (the last unfainted party member behind
-        // the slot) is deterministic from the imported party.
-        let illusion_species = if b(mv, "illusion") {
-            let slot = if b(mv, "active") { i(mv, "position").max(0) as usize } else { 6 };
-            self.illusion_target(sidx, slot)
-        } else {
-            0
-        };
+        // An active illusion is marked here and resolved after the whole party is
+        // imported: the pinned rule (the last unfainted party member behind the slot)
+        // reads every member's brought/fainted state.
+        let illusion_species = if b(mv, "illusion") { u16::MAX } else { 0 };
         let m = &mut self.sides[sidx].mons[idx];
         m.brought = true;
         let sp = s(mv, "species");
@@ -594,6 +599,11 @@ impl Battle {
                     v.partial_trap = dur;
                     v.partial_trap_src = i(st, "sourceSlot").clamp(0, 3) as u8;
                     v.partial_trap_mon = i(st, "sourceIdx").clamp(0, 5) as u8;
+                    if let Some(x) = st.get("sourceEffect").and_then(|x| x.as_str()) {
+                        if let Some(mid) = d.move_id(x) {
+                            v.partial_trap_move = mid;
+                        }
+                    }
                     if i(st, "boundDivisor") != 0 && i(st, "boundDivisor") != 8 {
                         return Err("binding band unsupported".into());
                     }
@@ -726,7 +736,9 @@ impl Battle {
         let mut order: Vec<String> = vec![];
         for line in self.log_lines.iter().skip(log_start) {
             if let Some(rest) = line.strip_prefix("|move|") {
-                if line.contains("[from]") {
+                // As lib.js outcome(): a called move ([from] ...) is not an action of its
+                // own, but the second turn of a two-turn move ([from] lockedmove) is.
+                if line.contains("[from]") && !line.contains("[from] lockedmove") {
                     continue;
                 }
                 order.push(rest.chars().take(3).collect());

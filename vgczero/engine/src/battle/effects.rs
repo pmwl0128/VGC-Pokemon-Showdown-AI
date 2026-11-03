@@ -14,17 +14,21 @@ pub enum BoostSrc {
     SelfInflicted,
     /// An opponent's (or ally's) move effect.
     Move(Pos),
+    /// A move's secondary effect (no zero-delta report, no block message).
+    SecMove(Pos),
     /// Intimidate from a Pokemon.
     Intimidate(Pos),
     /// Other ability (Cotton Down, etc.) from a Pokemon.
     Ability(Pos),
+    /// A terrain seed (Grassy Seed...): the boost line names the item.
+    Seed(&'static str),
 }
 
 impl BoostSrc {
     fn source(self) -> Option<Pos> {
         match self {
-            BoostSrc::SelfInflicted => None,
-            BoostSrc::Move(p) | BoostSrc::Intimidate(p) | BoostSrc::Ability(p) => Some(p),
+            BoostSrc::SelfInflicted | BoostSrc::Seed(_) => None,
+            BoostSrc::Move(p) | BoostSrc::SecMove(p) | BoostSrc::Intimidate(p) | BoostSrc::Ability(p) => Some(p),
         }
     }
 }
@@ -115,20 +119,39 @@ impl Battle {
         if from_other {
             let mut blocked_all = false;
             match tab {
-                Ab::ClearBody | Ab::WhiteSmoke | Ab::FullMetalBody => blocked_all = true,
+                // Pinned onTryBoost: the blocked drop is announced as a `-fail ... unboost`
+                // naming the ability (the whole-body abilities without a stat).
+                Ab::ClearBody | Ab::WhiteSmoke | Ab::FullMetalBody => {
+                    if b.iter().any(|&x| x < 0) {
+                        blocked_all = true;
+                        let aname = match tab {
+                            Ab::ClearBody => "Clear Body",
+                            Ab::WhiteSmoke => "White Smoke",
+                            _ => "Full Metal Body",
+                        };
+                        // Pinned clearbody.onTryBoost: a secondary's drop is blocked silently.
+                        if !matches!(src, BoostSrc::SecMove(_)) {
+                            blog!(self, "|-fail|{}|unboost|[from] ability: {}|[of] {}", self.name(tgt), aname, self.name(tgt));
+                        }
+                    }
+                }
                 Ab::HyperCutter => {
                     if b[B_ATK] < 0 {
                         b[B_ATK] = 0;
+                        blog!(self, "|-fail|{}|unboost|atk|[from] ability: Hyper Cutter|[of] {}", self.name(tgt), self.name(tgt));
                     }
                 }
                 Ab::BigPecks => {
                     if b[B_DEF] < 0 {
                         b[B_DEF] = 0;
+                        blog!(self, "|-fail|{}|unboost|def|[from] ability: Big Pecks|[of] {}", self.name(tgt), self.name(tgt));
                     }
                 }
                 Ab::Illuminate | Ab::KeenEye => {
                     if b[B_ACC] < 0 {
                         b[B_ACC] = 0;
+                        let aname = if tab == Ab::Illuminate { "Illuminate" } else { "Keen Eye" };
+                        blog!(self, "|-fail|{}|unboost|accuracy|[from] ability: {}|[of] {}", self.name(tgt), aname, self.name(tgt));
                     }
                 }
                 Ab::MirrorArmor => {
@@ -195,6 +218,12 @@ impl Battle {
             m.boosts[i] = new;
             let delta = new - old;
             if delta == 0 {
+                // Pinned boost reporting: a move- or item-driven boost still reports its
+                // zero delta (`-boost|X|atk|0`); ability-driven boosts report only changes.
+                if matches!(src, BoostSrc::Move(_) | BoostSrc::Seed(_)) {
+                    let msg = if b[i] < 0 || old == -6 { "-unboost" } else { "-boost" };
+                    blog!(self, "|{}|{}|{}|0", msg, self.name(tgt), STAT_NAMES[i]);
+                }
                 continue;
             }
             changed = true;
@@ -203,18 +232,26 @@ impl Battle {
             } else {
                 raised = true;
             }
-            blog!(self, "|{}|{}|{}|{}", if delta > 0 { "-boost" } else { "-unboost" }, self.name(tgt), STAT_NAMES[i], delta.abs());
+            // Pinned boost reporting: an item's boost names the item.
+            let suffix = match src {
+                BoostSrc::Seed(n) => format!("|[from] item: {}", n),
+                _ => String::new(),
+            };
+            blog!(self, "|{}|{}|{}|{}{}", if delta > 0 { "-boost" } else { "-unboost" }, self.name(tgt), STAT_NAMES[i], delta.abs(), suffix);
             if b[i] < 0 && foe_src {
                 let up_stat = match self.ab(tgt) {
-                    Ab::Defiant => Some(B_ATK),
-                    Ab::Competitive => Some(B_SPA),
+                    Ab::Defiant => Some((B_ATK, "Defiant")),
+                    Ab::Competitive => Some((B_SPA, "Competitive")),
                     _ => None,
                 };
-                if let Some(st) = up_stat {
-                    self.reveal_ability(tgt);
+                if let Some((st, aname)) = up_stat {
                     let mut up = [0i8; 7];
                     up[st] = 2;
-                    self.boost(tgt, &up, BoostSrc::SelfInflicted);
+                    // Pinned boost reporting names the ability behind a reported boost.
+                    if self.boost(tgt, &up, BoostSrc::SelfInflicted) {
+                        self.reveal_ability(tgt);
+                        blog!(self, "|-ability|{}|{}|boost", self.name(tgt), aname);
+                    }
                 }
             }
         }
@@ -488,7 +525,11 @@ impl Battle {
                 blog!(self, "|-start|{}|confusion", self.name(tgt));
                 self.check_status_berry(tgt);
             }
-            VolKind::MustRecharge => self.mm(tgt).vol.must_recharge = true,
+            VolKind::MustRecharge => {
+                self.mm(tgt).vol.must_recharge = true;
+                // Pinned mustrecharge onStart.
+                blog!(self, "|-mustrecharge|{}", self.name(tgt));
+            }
             VolKind::Minimize => {
                 // onRestart returns null: a second Minimize keeps the volatile but fails to add.
                 if self.m(tgt).vol.minimize {
@@ -519,6 +560,12 @@ impl Battle {
                     return false;
                 }
                 self.mm(tgt).vol.yawn = 2;
+                // Pinned yawn condition onStart.
+                if let Some(s) = src {
+                    blog!(self, "|-start|{}|move: Yawn|[of] {}", self.name(tgt), self.name(s));
+                } else {
+                    blog!(self, "|-start|{}|move: Yawn", self.name(tgt));
+                }
             }
             VolKind::FocusEnergy => {
                 if self.m(tgt).vol.crit_stage >= 2 {
@@ -547,6 +594,7 @@ impl Battle {
                     return false;
                 }
                 self.mm(tgt).vol.imprison = true;
+                blog!(self, "|-start|{}|move: Imprison", self.name(tgt));
             }
             VolKind::GlaiveRush => self.mm(tgt).vol.glaive_rush = 1,
             VolKind::SaltCure => {
@@ -567,6 +615,8 @@ impl Battle {
                     return false;
                 }
                 self.mm(tgt).vol.heal_block = 5;
+                // Pinned healblock condition onStart.
+                blog!(self, "|-start|{}|move: Heal Block", self.name(tgt));
             }
             VolKind::MagnetRise => {
                 if self.m(tgt).vol.magnet_rise > 0 || self.m(tgt).vol.smacked_down || self.m(tgt).vol.ingrain {
@@ -640,6 +690,8 @@ impl Battle {
                     return false;
                 }
                 self.mm(tgt).vol.stockpile += 1;
+                // Pinned stockpile condition onStart / onRestart.
+                blog!(self, "|-start|{}|stockpile{}", self.name(tgt), self.m(tgt).vol.stockpile);
                 let mut up = [0i8; 7];
                 up[B_DEF] = 1;
                 up[B_SPD] = 1;
@@ -653,10 +705,16 @@ impl Battle {
                 let s = src.unwrap_or(tgt);
                 let mon = self.sides[s.s()].active[s.i()];
                 let dur = self.rng.range(5, 7) as u8;
+                // Pinned partiallytrapped onStart: `-activate|X|move: <move>|[of] <source>`.
+                let pm = self.m(tgt).vol.partial_trap_move;
+                let mvname = if pm != 0 { self.dex.mv(pm).name.clone() } else { String::new() };
                 let m = self.mm(tgt);
                 m.vol.partial_trap = dur;
                 m.vol.partial_trap_src = s.code();
                 m.vol.partial_trap_mon = mon;
+                if pm != 0 {
+                    blog!(self, "|-activate|{}|move: {}|[of] {}", self.name(tgt), mvname, self.name(s));
+                }
             }
             // Pinned conditions.ts lockedmove: onStart draws trueDuration = random(2, 4) and
             // locks the move just used (duration 2); onRestart refreshes the duration while
@@ -758,7 +816,8 @@ impl Battle {
                 } else if full && m.hp > 1 && self.tab(tgt) == Ab::Sturdy {
                     dmg = m.hp as u32 - 1;
                     self.reveal_ability(tgt);
-                    blog!(self, "|-activate|{}|ability: Sturdy", self.name(tgt));
+                    // Pinned sturdy onDamage.
+                    blog!(self, "|-ability|{}|Sturdy", self.name(tgt));
                 } else if full && m.hp > 1 && self.it(tgt) == It::FocusSash {
                     dmg = m.hp as u32 - 1;
                     blog!(self, "|-enditem|{}|Focus Sash", self.name(tgt));
@@ -1164,16 +1223,19 @@ impl Battle {
             return;
         }
         let t = self.field.terrain;
-        let stat = match (self.it(p), t) {
-            (It::GrassySeed, Terrain::Grassy) | (It::ElectricSeed, Terrain::Electric) => B_DEF,
-            (It::PsychicSeed, Terrain::Psychic) | (It::MistySeed, Terrain::Misty) => B_SPD,
+        let (stat, seed) = match (self.it(p), t) {
+            (It::GrassySeed, Terrain::Grassy) => (B_DEF, "Grassy Seed"),
+            (It::ElectricSeed, Terrain::Electric) => (B_DEF, "Electric Seed"),
+            (It::PsychicSeed, Terrain::Psychic) => (B_SPD, "Psychic Seed"),
+            (It::MistySeed, Terrain::Misty) => (B_SPD, "Misty Seed"),
             _ => return,
         };
         let mut up = [0i8; 7];
         up[stat] = 1;
-        blog!(self, "|-enditem|{}|seed", self.name(p));
+        // Pinned onUse: the item leaves under its name; the boost line names it as `[from] item:`.
+        blog!(self, "|-enditem|{}|{}", self.name(p), seed);
         self.consume_item(p);
-        self.boost(p, &up, BoostSrc::SelfInflicted);
+        self.boost(p, &up, BoostSrc::Seed(seed));
     }
 
     // ---- Mega Evolution -----------------------------------------------------------------

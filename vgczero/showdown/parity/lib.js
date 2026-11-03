@@ -167,7 +167,12 @@ function slotStrCode(s) {
 function effectState(st) {
 	const out = {};
 	for (const [k, v] of Object.entries(st)) {
-		if (['id', 'target', 'effectOrder', 'sourceEffect', 'linkedPokemon', 'linkedStatus'].includes(k)) continue;
+		if (['id', 'target', 'effectOrder', 'linkedPokemon', 'linkedStatus'].includes(k)) continue;
+		if (k === 'sourceEffect') {
+			const eid = typeof v === 'string' ? v : v && v.id;
+			if (eid) out.sourceEffect = eid;
+			continue;
+		}
 		if (k === 'source') {
 			if (v && v.getSlot) {
 				out.sourceSlot = slotStrCode(v.getSlot());

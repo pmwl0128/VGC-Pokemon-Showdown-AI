@@ -421,10 +421,34 @@ impl Battle {
                     self.sides[s].wish[slot] = (t - 1, amt);
                 }
             }
-            Res::Reflect => self.sides[code as usize].conds.reflect = self.sides[code as usize].conds.reflect.saturating_sub(1),
-            Res::LightScreen => self.sides[code as usize].conds.light_screen = self.sides[code as usize].conds.light_screen.saturating_sub(1),
-            Res::Safeguard => self.sides[code as usize].conds.safeguard = self.sides[code as usize].conds.safeguard.saturating_sub(1),
-            Res::Mist => self.sides[code as usize].conds.mist = self.sides[code as usize].conds.mist.saturating_sub(1),
+            Res::Reflect => {
+                let c = &mut self.sides[code as usize].conds;
+                c.reflect = c.reflect.saturating_sub(1);
+                if c.reflect == 0 {
+                    blog!(self, "|-sideend|p{}: p{}|Reflect", code + 1, code + 1);
+                }
+            }
+            Res::LightScreen => {
+                let c = &mut self.sides[code as usize].conds;
+                c.light_screen = c.light_screen.saturating_sub(1);
+                if c.light_screen == 0 {
+                    blog!(self, "|-sideend|p{}: p{}|move: Light Screen", code + 1, code + 1);
+                }
+            }
+            Res::Safeguard => {
+                let c = &mut self.sides[code as usize].conds;
+                c.safeguard = c.safeguard.saturating_sub(1);
+                if c.safeguard == 0 {
+                    blog!(self, "|-sideend|p{}: p{}|Safeguard", code + 1, code + 1);
+                }
+            }
+            Res::Mist => {
+                let c = &mut self.sides[code as usize].conds;
+                c.mist = c.mist.saturating_sub(1);
+                if c.mist == 0 {
+                    blog!(self, "|-sideend|p{}: p{}|Mist", code + 1, code + 1);
+                }
+            }
             Res::Tailwind => {
                 let c = &mut self.sides[code as usize].conds;
                 c.tailwind = c.tailwind.saturating_sub(1);
@@ -432,7 +456,13 @@ impl Battle {
                     blog!(self, "|-sideend|p{}: p{}|move: Tailwind", code + 1, code + 1);
                 }
             }
-            Res::AuroraVeil => self.sides[code as usize].conds.aurora_veil = self.sides[code as usize].conds.aurora_veil.saturating_sub(1),
+            Res::AuroraVeil => {
+                let c = &mut self.sides[code as usize].conds;
+                c.aurora_veil = c.aurora_veil.saturating_sub(1);
+                if c.aurora_veil == 0 {
+                    blog!(self, "|-sideend|p{}: p{}|move: Aurora Veil", code + 1, code + 1);
+                }
+            }
             Res::WideGuard => self.sides[code as usize].conds.wide_guard = false,
             Res::QuickGuard => self.sides[code as usize].conds.quick_guard = false,
             Res::TrickRoom => {
@@ -627,15 +657,33 @@ impl Battle {
                 // Duration ticks first; then it ends if the trapper left.
                 self.mm(p).vol.partial_trap -= 1;
                 if self.m(p).vol.partial_trap == 0 {
+                    // Pinned onEnd (the duration ran out).
+                    let pm = self.m(p).vol.partial_trap_move;
+                    if pm != 0 {
+                        let mvname = self.dex.mv(pm).name.clone();
+                        blog!(self, "|-end|{}|{}|[partiallytrapped]", self.name(p), mvname);
+                    }
                     return;
                 }
                 if !self.partial_trapper_active(p) {
                     self.mm(p).vol.partial_trap = 0;
+                    // Pinned onResidual: the trapper left, and the end is silent.
+                    let pm = self.m(p).vol.partial_trap_move;
+                    if pm != 0 {
+                        let mvname = self.dex.mv(pm).name.clone();
+                        blog!(self, "|-end|{}|{}|[partiallytrapped]|[silent]", self.name(p), mvname);
+                    }
                     return;
                 }
                 self.damage(p, (mh / 8).max(1), None, DmgKind::Indirect);
             }
-            Res::Taunt => self.mm(p).vol.taunt -= 1,
+            Res::Taunt => {
+                let m = self.mm(p);
+                m.vol.taunt -= 1;
+                if m.vol.taunt == 0 {
+                    blog!(self, "|-end|{}|move: Taunt", self.name(p));
+                }
+            }
             Res::Encore => {
                 let m = self.mm(p);
                 m.vol.encore -= 1;
@@ -644,15 +692,33 @@ impl Battle {
                 if m.pp[s] == 0 {
                     m.vol.encore = 0;
                 }
+                if m.vol.encore == 0 {
+                    blog!(self, "|-end|{}|Encore", self.name(p));
+                }
             }
             Res::Disable => self.mm(p).vol.disable -= 1,
             Res::MagnetRise => self.mm(p).vol.magnet_rise -= 1,
-            Res::HealBlock => self.mm(p).vol.heal_block -= 1,
-            Res::ThroatChop => self.mm(p).vol.throat_chop -= 1,
+            Res::HealBlock => {
+                let m = self.mm(p);
+                m.vol.heal_block -= 1;
+                if m.vol.heal_block == 0 {
+                    // Pinned healblock condition onEnd.
+                    blog!(self, "|-end|{}|move: Heal Block", self.name(p));
+                }
+            }
+            Res::ThroatChop => {
+                let m = self.mm(p);
+                m.vol.throat_chop -= 1;
+                if m.vol.throat_chop == 0 {
+                    blog!(self, "|-end|{}|Throat Chop|[silent]", self.name(p));
+                }
+            }
             Res::Yawn => {
                 let m = self.mm(p);
                 m.vol.yawn -= 1;
                 if m.vol.yawn == 0 {
+                    // Pinned yawn onEnd: the silent end, then the sleep.
+                    blog!(self, "|-end|{}|move: Yawn|[silent]", self.name(p));
                     self.try_set_status(p, Status::Slp, None);
                 }
             }
@@ -676,10 +742,10 @@ impl Battle {
                 }
                 let mut up = [0i8; 7];
                 up[B_SPE] = 1;
-                self.reveal_ability(p);
-                // Pinned boost reporting names the ability behind the boost first.
-                blog!(self, "|-ability|{}|Speed Boost|boost", self.name(p));
-                self.boost(p, &up, BoostSrc::SelfInflicted);
+                if self.boost(p, &up, BoostSrc::SelfInflicted) {
+                    self.reveal_ability(p);
+                    blog!(self, "|-ability|{}|Speed Boost|boost", self.name(p));
+                }
             }
             Res::Moody => {
                 let boosts = self.m(p).boosts;
@@ -694,8 +760,10 @@ impl Battle {
                     let d = downs[self.rng.below(downs.len() as u32) as usize];
                     b[d] = -1;
                 }
-                self.reveal_ability(p);
-                self.boost(p, &b, BoostSrc::SelfInflicted);
+                if self.boost(p, &b, BoostSrc::SelfInflicted) {
+                    self.reveal_ability(p);
+                    blog!(self, "|-ability|{}|Moody|boost", self.name(p));
+                }
             }
             Res::Roost => self.mm(p).vol.roost = false,
             Res::WhiteHerb => self.check_white_herb(p),

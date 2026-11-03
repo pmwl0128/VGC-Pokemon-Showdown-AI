@@ -131,6 +131,8 @@ pub struct Vol {
     /// Position code and team index of the Pokemon that partially trapped us.
     pub partial_trap_src: u8,
     pub partial_trap_mon: u8,
+    /// The partially trapping move's MoveId (0: unknown).
+    pub partial_trap_move: u16,
     pub type_changed: bool,
     /// Protean / Libero already changed the type since switching in.
     pub protean: bool,

@@ -580,7 +580,7 @@ impl Battle {
             if self.sides[s].active[slot] as usize == to {
                 let q = Pos::new(s, slot);
                 self.queue.remove_where(|a| a.pos == q);
-                self.switch_out_in(q, to);
+                self.switch_out_in(q, to, false);
                 return Some(q);
             }
         }
@@ -1109,12 +1109,15 @@ impl Battle {
         if i == NO_MON {
             return format!("p{}{}: (empty)", p.side + 1, if p.slot == 0 { 'a' } else { 'b' });
         }
+        // Pinned Pokemon.name: without a nickname `set.name` is the base species name, and an
+        // active Illusion displays (and is referred to) as its target.
+        let m = &self.sides[p.s()].mons[i as usize];
+        let species = if m.vol.illusion_species != 0 { m.vol.illusion_species } else { m.species };
         format!(
             "p{}{}: {}",
             p.side + 1,
             if p.slot == 0 { 'a' } else { 'b' },
-            // Pinned Pokemon(): without a nickname, `set.name` is the base species name.
-            self.dex.sp(self.sides[p.s()].mons[i as usize].species).base_species
+            self.dex.sp(species).base_species
         )
     }
 
@@ -1153,10 +1156,12 @@ impl Battle {
         Self::hp_text_mon(self.m(p))
     }
 
-    /// Pinned `getUpdatedDetails`: species name, `, L<level>` unless 100, `, M`/`, F`.
+    /// Pinned `getUpdatedDetails`: species name, `, L<level>` unless 100, `, M`/`, F`; an
+    /// active Illusion shows its target's species.
     pub fn details(&self, p: Pos) -> String {
         let m = self.m(p);
-        let mut s = self.dex.sp(m.species).name.clone();
+        let species = if m.vol.illusion_species != 0 { m.vol.illusion_species } else { m.species };
+        let mut s = self.dex.sp(species).name.clone();
         if m.level != 100 {
             s.push_str(&format!(", L{}", m.level));
         }
