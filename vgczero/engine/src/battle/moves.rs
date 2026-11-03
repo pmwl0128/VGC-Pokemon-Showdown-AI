@@ -3,7 +3,7 @@
 //! secondaries, contact/on-hit reactions, and scripted moves.
 
 use super::calc::ActiveMove;
-use super::effects::{BoostSrc, DmgKind};
+use super::effects::{BoostSrc, DmgKind, LogFrom, StatusFrom};
 use super::legal::is_choice;
 use super::{blog, ActionKind, Battle};
 use crate::dex::{
@@ -247,7 +247,7 @@ impl Battle {
             } else if self.rng.chance(33, 100) {
                 let dmg = self.confusion_damage(p);
                 blog!(self, "|-activate|{}|confusion", self.name(p));
-                self.damage(p, dmg, Some(p), DmgKind::Confusion);
+                self.damage_from(p, dmg, Some(p), DmgKind::Confusion, LogFrom::Confusion);
                 return Err(true);
             }
         }
@@ -436,8 +436,10 @@ impl Battle {
         }
 
         if mv.selfdestruct == 1 {
-            let hp = self.m(p).hp as u32;
-            self.damage(p, hp, Some(p), DmgKind::SelfCost);
+            // Pinned useMoveInner: faint(pokemon, pokemon, move) up front (a `|faint|` line, no
+            // damage line).
+            self.mm(p).hp = 0;
+            self.queue_faint(p);
         }
         if n > 1 && !mv.smart_target {
             am.spread_hit = true;
@@ -536,7 +538,11 @@ impl Battle {
             let aimed = am.target == Target::All || last_target.map(|t| t.side == q.side).unwrap_or(false);
             if aimed {
                 self.reveal_ability(q);
-                blog!(self, "|cant|{}|ability: Dazzling|{}", self.name(q), self.dex.mv(am.id).name);
+                // Pinned onFoeTryMove: attrLastMove('[still]'), then the cant line naming the
+                // holder's ability with the user as `[of]`.
+                self.attr_last_move("[still]");
+                let aname = self.dex.ability(self.m(q).ability).name.clone();
+                blog!(self, "|cant|{}|ability: {}|{}|[of] {}", self.name(q), aname, self.dex.mv(am.id).name, self.name(p));
                 return true;
             }
         }
@@ -996,14 +1002,16 @@ impl Battle {
             }
         }
         if mv.weather != Weather::None {
-            ok = self.set_weather(mv.weather, p);
+            ok = self.set_weather(mv.weather, p, false);
         }
         if mv.terrain != Terrain::None {
-            ok = self.set_terrain(mv.terrain, p);
+            ok = self.set_terrain(mv.terrain, p, false);
         }
         // selfSwitch of a field move (Chilly Reception): only after the move succeeded.
         if ok && mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
-            self.mm(p).vol.switch_flag = true;
+            let m = self.mm(p);
+            m.vol.switch_flag = true;
+            m.vol.switch_move = am.id;
         }
         match am.fx {
             MoveFx::Haze => {
@@ -1060,6 +1068,7 @@ impl Battle {
                     return false;
                 }
                 c.tailwind = 4;
+                blog!(self, "|-sidestart|p{}: p{}|move: Tailwind", side + 1, side + 1);
                 // Wind Rider allies get +1 Atk.
                 for slot in 0..2 {
                     let q = Pos::new(side, slot);
@@ -1116,6 +1125,7 @@ impl Battle {
                 } else {
                     c.quick_guard = true;
                 }
+                blog!(self, "|-singleturn|{}|{}", self.name(p), if sc == SideCond::WideGuard { "Wide Guard" } else { "Quick Guard" });
                 true
             }
             SideCond::StealthRock | SideCond::ToxicSpikes | SideCond::Spikes | SideCond::StickyWeb => {
@@ -1127,6 +1137,14 @@ impl Battle {
                     SideCond::StickyWeb if !c.sticky_web => c.sticky_web = true,
                     _ => return false,
                 }
+                // Pinned onSideStart / onSideRestart (every layer announces itself).
+                let label = match sc {
+                    SideCond::StealthRock => "move: Stealth Rock",
+                    SideCond::ToxicSpikes => "move: Toxic Spikes",
+                    SideCond::Spikes => "Spikes",
+                    _ => "move: Sticky Web",
+                };
+                blog!(self, "|-sidestart|p{}: p{}|{}", side + 1, side + 1, label);
                 let _ = am;
                 true
             }
@@ -1305,7 +1323,9 @@ impl Battle {
                         match prot {
                             ProtectKind::SpikyShield => {
                                 let mh = self.m(p).max_hp as u32;
-                                self.damage(p, (mh / 8).max(1), Some(t), DmgKind::Indirect);
+                                // Pinned `this.damage(baseMaxhp / 8, source, target)` under the
+                                // spikyshield condition: `[from] Spiky Shield|[of] holder`.
+                                self.damage_from(p, (mh / 8).max(1), Some(t), DmgKind::Indirect, LogFrom::Cond("Spiky Shield"));
                             }
                             ProtectKind::BanefulBunker => {
                                 self.try_set_status(p, Status::Psn, Some(t));
@@ -1363,46 +1383,72 @@ impl Battle {
         if !foe && am.category != Category::Status && self.tab(t) == Ab::Telepathy {
             return Hit::Failed;
         }
-        // Absorbing abilities.
+        // Absorbing abilities (pinned onTryHit handlers): the heal or boost, an immune
+        // message only when it did nothing, then the move fails for this target.
         let tab = self.tab(t);
         let absorb = match (tab, am.ty) {
             (Ab::VoltAbsorb, Type::Electric) | (Ab::WaterAbsorb, Type::Water) | (Ab::DrySkin, Type::Water) | (Ab::EarthEater, Type::Ground) => {
                 let mh = self.m(t).max_hp as u32;
-                self.heal(t, mh / 4);
+                let aname = match tab {
+                    Ab::VoltAbsorb => "Volt Absorb",
+                    Ab::WaterAbsorb => "Water Absorb",
+                    Ab::DrySkin => "Dry Skin",
+                    _ => "Earth Eater",
+                };
+                if self.heal_from(t, mh / 4, LogFrom::Ability(aname), Some(p)) == 0 {
+                    blog!(self, "|-immune|{}|[from] ability: {}", self.name(t), aname);
+                }
                 true
             }
             (Ab::LightningRod, Type::Electric) | (Ab::StormDrain, Type::Water) => {
-                self.boost(t, &ups(B_SPA, 1), BoostSrc::SelfInflicted);
+                if !self.boost(t, &ups(B_SPA, 1), BoostSrc::SelfInflicted) {
+                    let aname = if tab == Ab::LightningRod { "Lightning Rod" } else { "Storm Drain" };
+                    blog!(self, "|-immune|{}|[from] ability: {}", self.name(t), aname);
+                }
                 true
             }
             (Ab::Sapsipper, Type::Grass) => {
-                self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted);
+                if !self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                    blog!(self, "|-immune|{}|[from] ability: Sap Sipper", self.name(t));
+                }
                 true
             }
             (Ab::MotorDrive, Type::Electric) => {
-                self.boost(t, &ups(B_SPE, 1), BoostSrc::SelfInflicted);
+                if !self.boost(t, &ups(B_SPE, 1), BoostSrc::SelfInflicted) {
+                    blog!(self, "|-immune|{}|[from] ability: Motor Drive", self.name(t));
+                }
                 true
             }
             (Ab::WellBakedBody, Type::Fire) => {
-                self.boost(t, &ups(B_DEF, 2), BoostSrc::SelfInflicted);
+                if !self.boost(t, &ups(B_DEF, 2), BoostSrc::SelfInflicted) {
+                    blog!(self, "|-immune|{}|[from] ability: Well-Baked Body", self.name(t));
+                }
                 true
             }
             (Ab::FlashFire, Type::Fire) => {
-                self.mm(t).vol.flash_fire = true;
+                // Pinned flashfire.onTryHit: addVolatile starts the volatile (`-start`) the
+                // first time; afterwards only the immune message.
+                if self.m(t).vol.flash_fire {
+                    blog!(self, "|-immune|{}|[from] ability: Flash Fire", self.name(t));
+                } else {
+                    self.mm(t).vol.flash_fire = true;
+                    blog!(self, "|-start|{}|ability: Flash Fire", self.name(t));
+                }
                 // Showdown's Flash Fire sets move.accuracy = true: the rest of
                 // a spread move's targets can no longer be missed.
                 am.accuracy = 0;
                 true
             }
             (Ab::WindRider, _) if am.flags & flag::WIND != 0 => {
-                self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted);
+                if !self.boost(t, &ups(B_ATK, 1), BoostSrc::SelfInflicted) {
+                    blog!(self, "|-immune|{}|[from] ability: Wind Rider", self.name(t));
+                }
                 true
             }
             _ => false,
         };
         if absorb && !(am.category == Category::Status && am.target == Target::User) {
             self.reveal_ability(t);
-            blog!(self, "|-immune|{}|[from] ability", self.name(t));
             return Hit::Failed;
         }
         if am.flags & flag::SOUND != 0 && tab == Ab::Soundproof && t != p {
@@ -1545,8 +1591,9 @@ impl Battle {
             // selfdestruct 'ifHit' (Memento; Final Gambit and Healing Wish pay in their own
             // effects): the user faints once the move reaches a target.
             if mv.selfdestruct == 2 && !matches!(am.fx, MoveFx::FinalGambit | MoveFx::HealingWish) && self.is_live(p) {
-                let hp = self.m(p).hp as u32;
-                self.damage(p, hp, Some(p), DmgKind::SelfCost);
+                // Pinned faint(source, source, move): no damage line.
+                self.mm(p).hp = 0;
+                self.queue_faint(p);
             }
             // hitStepMoveHitLoop: a hit that failed on every target ends the loop (no Update).
             let this_failed = (0..n).all(|i| dmg[i].is_none() && !status_ok[i]);
@@ -1682,7 +1729,10 @@ impl Battle {
             if let Some(bt) = super::calc::resist_berry(self.it(t)).filter(|_| !fixed_hit[i]) {
                 let eff = self.effectiveness(am.ty, t, Some(am));
                 if bt == am.ty && (eff > 0 || bt == Type::Normal) && !self.unnerved(t) && !hits_sub {
-                    blog!(self, "|-enditem|{}|berry|[eat]", self.name(t));
+                    // Pinned: `[weaken]` from onSourceModifyDamage, `[eat]` from eatItem.
+                    let iname = self.dex.item(self.m(t).item).name.clone();
+                    blog!(self, "|-enditem|{}|{}|[eat]", self.name(t), iname);
+                    blog!(self, "|-enditem|{}|{}|[weaken]", self.name(t), iname);
                     self.eat_item(t);
                 }
             }
@@ -1699,7 +1749,7 @@ impl Battle {
                 }
                 if mv.drain.0 > 0 {
                     let h = ((absorbed as f64) * mv.drain.0 as f64 / mv.drain.1 as f64).ceil() as u32;
-                    self.drain_heal(p, h);
+                    self.drain_heal(p, h, LogFrom::Drain, Some(t));
                 }
                 // HIT_SUBSTITUTE: the target takes no further effects (an Air
                 // Balloon still pops: onAfterSubDamage).
@@ -1726,7 +1776,7 @@ impl Battle {
             // Drain.
             if mv.drain.0 > 0 && dealt > 0 {
                 let h = ((dealt as f64) * mv.drain.0 as f64 / mv.drain.1 as f64).round() as u32;
-                self.drain_heal(p, h);
+                self.drain_heal(p, h, LogFrom::Drain, Some(t));
             }
         }
         // Move effects per target (status moves and damaging moves' main effects).
@@ -1872,8 +1922,9 @@ impl Battle {
                     }
                 }
                 MoveFx::FinalGambit => {
-                    let hp = self.m(p).hp as u32;
-                    self.damage(p, hp, Some(p), DmgKind::SelfCost);
+                    // Pinned damageCallback: pokemon.faint() (no damage line).
+                    self.mm(p).hp = 0;
+                    self.queue_faint(p);
                 }
                 _ => {}
             }
@@ -1886,7 +1937,9 @@ impl Battle {
         }
         // Self-switch (U-turn, Flip Turn, Volt Switch).
         if mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
-            self.mm(p).vol.switch_flag = true;
+            let m = self.mm(p);
+            m.vol.switch_flag = true;
+            m.vol.switch_move = am.id;
         }
         let _ = dealt;
     }
@@ -1991,17 +2044,26 @@ impl Battle {
                     _ => ProtectKind::Protect,
                 };
                 self.mm(p).vol.protect = k;
+                // Pinned condition onStart: Protect, King's Shield, Silk Trap and Obstruct say
+                // 'Protect'; Baneful Bunker, Burning Bulwark and Spiky Shield 'move: Protect'.
+                let label = match k {
+                    ProtectKind::BanefulBunker | ProtectKind::BurningBulwark | ProtectKind::SpikyShield => "move: Protect",
+                    _ => "Protect",
+                };
+                blog!(self, "|-singleturn|{}|{}", self.name(p), label);
                 self.add_stall(p);
                 return true;
             }
             MoveFx::Endure => {
                 self.mm(p).vol.endure = true;
+                blog!(self, "|-singleturn|{}|move: Endure", self.name(p));
                 self.add_stall(p);
                 return true;
             }
             MoveFx::HelpingHand => {
                 if self.is_live(t) {
                     self.mm(t).vol.helping_hand += 1;
+                    blog!(self, "|-singleturn|{}|Helping Hand|[of] {}", self.name(t), self.name(p));
                     // Already-queued actions pick it up at use time.
                     return true;
                 }
@@ -2021,10 +2083,12 @@ impl Battle {
             }
             MoveFx::FollowMe => {
                 self.mm(p).vol.follow_me = 1;
+                blog!(self, "|-singleturn|{}|move: Follow Me", self.name(p));
                 return true;
             }
             MoveFx::RagePowder => {
                 self.mm(p).vol.follow_me = 2;
+                blog!(self, "|-singleturn|{}|move: Rage Powder", self.name(p));
                 return true;
             }
             MoveFx::PartingShot => {
@@ -2032,7 +2096,9 @@ impl Battle {
                 let mirror = self.tab(t) == Ab::MirrorArmor;
                 let success = self.boost(t, &b, from);
                 if (success || mirror) && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
-                    self.mm(p).vol.switch_flag = true;
+                    let m = self.mm(p);
+                    m.vol.switch_flag = true;
+                    m.vol.switch_move = am.id;
                 }
                 // onHit returns nothing: the move did something whether or not the drops
                 // landed (it only loses its selfSwitch, unless Mirror Armor reflected them).
@@ -2138,6 +2204,7 @@ impl Battle {
                 m.vol.substitute = (mh / 4) as u16;
                 m.vol.switch_shedtail = true;
                 m.vol.switch_flag = true;
+                m.vol.switch_move = am.id;
                 return true;
             }
             MoveFx::BatonPass => {
@@ -2147,6 +2214,7 @@ impl Battle {
                 let m = self.mm(p);
                 m.vol.switch_copyvolatile = true;
                 m.vol.switch_flag = true;
+                m.vol.switch_move = am.id;
                 return true;
             }
             MoveFx::Trick | MoveFx::Switcheroo => {
@@ -2289,7 +2357,8 @@ impl Battle {
                 }
                 let atk = super::calc::boosted(self.m(t).stats[1] as u32, self.m(t).boosts[B_ATK]);
                 self.boost(t, &ups(B_ATK, -1), from);
-                self.drain_heal(p, atk); // Big Root applies
+                // Pinned heals through the move itself (a plain line); Big Root applies.
+                self.drain_heal(p, atk, LogFrom::None, None);
                 return true;
             }
             MoveFx::HealPulse | MoveFx::FloralHealing => {
@@ -2397,13 +2466,14 @@ impl Battle {
                 let mh = self.m(p).max_hp as u32;
                 // Through the status path: immunity, the champions [2, 3, 3] startTime draw
                 // (slp onStart) and the -status log; then Rest's full heal.
-                if !self.set_status_over(p, Status::Slp, Some(p)) {
+                if !self.set_status_over_from(p, Status::Slp, Some(p), StatusFrom::Move(am.id)) {
                     return false;
                 }
                 // Pinned Rest.onHit overwrites what slp.onStart drew: the draw still happens,
                 // but Rest always sleeps for 3 turns (data/moves.ts:14979-14982).
                 self.mm(p).status_turns = 3;
-                self.heal(p, mh);
+                // Pinned heal(..., 'rest' effect): a silent line.
+                self.heal_from(p, mh, LogFrom::Silent, None);
                 self.check_status_berry(p);
                 return true;
             }
@@ -2430,8 +2500,9 @@ impl Battle {
             }
             MoveFx::HealingWish => {
                 self.sides[p.s()].healing_wish[p.i()] = true;
-                let hp = self.m(p).hp as u32;
-                self.damage(p, hp, Some(p), DmgKind::SelfCost);
+                // Pinned: the user faints (no damage line).
+                self.mm(p).hp = 0;
+                self.queue_faint(p);
                 return true;
             }
             MoveFx::Moonlight | MoveFx::MorningSun | MoveFx::Synthesis | MoveFx::ShoreUp => {
@@ -2527,7 +2598,7 @@ impl Battle {
             }
         }
         if mv.status != Status::None && self.is_live(t) {
-            ok |= self.try_set_status(t, mv.status, Some(p));
+            ok |= self.try_set_status_from(t, mv.status, Some(p), StatusFrom::Move(am.id));
         }
         if let Some(v) = mv.volatile {
             if self.is_live(t) {
@@ -2543,7 +2614,9 @@ impl Battle {
             ok |= self.boost(p, &b, BoostSrc::SelfInflicted);
         }
         if mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
-            self.mm(p).vol.switch_flag = true;
+            let m = self.mm(p);
+            m.vol.switch_flag = true;
+            m.vol.switch_move = am.id;
             ok = true;
         }
         // Roar / Whirlwind: canSwitch(target.side) decides whether the move did anything.
@@ -2588,7 +2661,7 @@ impl Battle {
             let _ = self.rng.below(100);
             if self.is_live(t) && !sub_hit {
                 if st != Status::None {
-                    self.try_set_status(t, st, Some(p));
+                    self.try_set_status_from(t, st, Some(p), StatusFrom::Move(am.id));
                 } else if let Some(v) = vk {
                     self.add_volatile(t, v, Some(p));
                 }
@@ -2629,11 +2702,11 @@ impl Battle {
                 match am.fx {
                     MoveFx::DireClaw => {
                         let st = [Status::Psn, Status::Par, Status::Slp][self.rng.below(3) as usize];
-                        self.try_set_status(t, st, Some(p));
+                        self.try_set_status_from(t, st, Some(p), StatusFrom::Move(am.id));
                     }
                     MoveFx::TriAttack => {
                         let st = [Status::Par, Status::Brn, Status::Frz][self.rng.below(3) as usize];
-                        self.try_set_status(t, st, Some(p));
+                        self.try_set_status_from(t, st, Some(p), StatusFrom::Move(am.id));
                     }
                     MoveFx::ThroatChop => {
                         if self.m(t).vol.throat_chop == 0 {
@@ -2642,7 +2715,7 @@ impl Battle {
                     }
                     MoveFx::BurningJealousy => {
                         if self.m(t).vol.stats_raised_this_turn {
-                            self.try_set_status(t, Status::Brn, Some(p));
+                            self.try_set_status_from(t, Status::Brn, Some(p), StatusFrom::Move(am.id));
                         }
                     }
                     MoveFx::AlluringVoice => {
@@ -2655,7 +2728,7 @@ impl Battle {
                 continue;
             }
             if sec.status != Status::None {
-                self.try_set_status(t, sec.status, Some(p));
+                self.try_set_status_from(t, sec.status, Some(p), StatusFrom::Move(am.id));
             }
             if let Some(v) = sec.volatile {
                 if v == VolKind::HealBlock && mv.id == "psychicnoise" {
@@ -2732,7 +2805,7 @@ impl Battle {
             match tab {
                 Ab::SeedSower => {
                     self.reveal_ability(t);
-                    self.set_terrain(Terrain::Grassy, t);
+                    self.set_terrain(Terrain::Grassy, t, true);
                 }
                 // The powder check decides whether the roll happens at all.
                 Ab::EffectSpore
@@ -2750,7 +2823,7 @@ impl Battle {
                         Status::None
                     };
                     if st != Status::None {
-                        self.try_set_status(p, st, Some(t));
+                        self.try_set_status_from(p, st, Some(t), StatusFrom::Ability("Effect Spore"));
                     }
                 }
                 _ => {}
@@ -2791,42 +2864,43 @@ impl Battle {
             match tab {
                 Ab::RoughSkin | Ab::IronBarbs if self.is_live(p) => {
                     let mh = self.m(p).max_hp as u32;
+                    let aname = if tab == Ab::RoughSkin { "Rough Skin" } else { "Iron Barbs" };
                     self.reveal_ability(t);
-                    self.damage(p, (mh / 8).max(1), Some(t), DmgKind::Indirect);
+                    self.damage_from(p, (mh / 8).max(1), Some(t), DmgKind::Indirect, LogFrom::Ability(aname));
                 }
                 Ab::Gooey if self.is_live(p) => {
                     self.reveal_ability(t);
                     self.boost(p, &ups(B_SPE, -1), BoostSrc::Ability(t));
                 }
                 Ab::FlameBody if self.rng.chance(3, 10) => {
-                    self.try_set_status(p, Status::Brn, Some(t));
+                    self.try_set_status_from(p, Status::Brn, Some(t), StatusFrom::Ability("Flame Body"));
                 }
                 Ab::Static if self.rng.chance(3, 10) => {
-                    self.try_set_status(p, Status::Par, Some(t));
+                    self.try_set_status_from(p, Status::Par, Some(t), StatusFrom::Ability("Static"));
                 }
                 Ab::PoisonPoint if self.rng.chance(3, 10) => {
-                    self.try_set_status(p, Status::Psn, Some(t));
+                    self.try_set_status_from(p, Status::Psn, Some(t), StatusFrom::Ability("Poison Point"));
                 }
                 _ => {}
             }
             if self.is_live(p) && self.m(t).item != 0 && self.dex.it(self.m(t).item) == It::RockyHelmet {
                 let mh = self.m(p).max_hp as u32;
                 self.reveal_item(t);
-                self.damage(p, (mh / 6).max(1), Some(t), DmgKind::Indirect);
+                self.damage_from(p, (mh / 6).max(1), Some(t), DmgKind::Indirect, LogFrom::Item("Rocky Helmet"));
             }
             // Poison Touch (attacker's onSourceDamagingHit): Shield Dust returns before the
             // roll; a target the hit knocked out still rolls (the status then fails).
             if !self.m(p).fainted && self.ab(p) == Ab::PoisonTouch && self.tab(t) != Ab::ShieldDust && self.rng.chance(3, 10) && self.is_live(t) {
-                self.try_set_status(t, Status::Psn, Some(p));
+                self.try_set_status_from(t, Status::Psn, Some(p), StatusFrom::Ability("Poison Touch"));
             }
         }
         // Spicy Spray burns whoever hit it.
         if self.m(t).ability != 0 && self.dex.ab(self.m(t).ability) == Ab::SpicySpray && self.is_live(p) {
-            self.try_set_status(p, Status::Brn, Some(t));
+            self.try_set_status_from(p, Status::Brn, Some(t), StatusFrom::Ability("Spicy Spray"));
         }
         // Innards Out.
         if !self.is_live(t) && self.dex.ab(self.m(t).ability) == Ab::InnardsOut && self.is_live(p) {
-            self.damage(p, dealt, Some(t), DmgKind::Indirect);
+            self.damage_from(p, dealt, Some(t), DmgKind::Indirect, LogFrom::Ability("Innards Out"));
         }
     }
 
@@ -2932,7 +3006,7 @@ impl Battle {
                 let mh = self.m(p).max_hp as u32;
                 let hp0 = self.m(p).hp as u32;
                 self.reveal_item(p);
-                self.damage(p, (mh / 10).max(1), Some(p), DmgKind::Indirect);
+                self.damage_from(p, (mh / 10).max(1), Some(p), DmgKind::Indirect, LogFrom::Item("Life Orb"));
                 if self.is_live(p) && (self.m(p).hp as u32) * 2 <= mh && hp0 * 2 > mh {
                     self.emergency_exit(p);
                 }
@@ -2940,7 +3014,7 @@ impl Battle {
         }
         // Shell Bell: an eighth of the damage dealt.
         if !stole && ok && total > 0 && self.it(p) == It::ShellBell && !am.sheer_force && !self.m(p).vol.force_switch && self.is_live(p) {
-            self.heal(p, (total / 8).max(1));
+            self.heal_from(p, (total / 8).max(1), LogFrom::Item("Shell Bell"), None);
         }
         // Moxie / Eelevate: KO'd a target.
         let kos = targets.iter().filter(|&&t| t != p && !self.is_live(t)).count() as i8;
@@ -2976,7 +3050,8 @@ impl Battle {
         if self.dex.mv(am.id).crash_damage && self.is_live(p) {
             let mh = self.m(p).max_hp as u32;
             let hp0 = self.m(p).hp as u32;
-            self.damage(p, mh / 2, Some(p), DmgKind::Indirect);
+            // Pinned conditions.get('High Jump Kick') has no condition: the raw id is named.
+            self.damage_from(p, mh / 2, Some(p), DmgKind::Indirect, LogFrom::RawMove(am.id));
             if self.is_live(p) && (self.m(p).hp as u32) * 2 <= mh && hp0 * 2 > mh {
                 self.emergency_exit(p);
             }
@@ -2985,7 +3060,7 @@ impl Battle {
         if am.fx == MoveFx::SteelBeam && self.is_live(p) {
             let mh = self.m(p).max_hp as u32;
             let hp0 = self.m(p).hp as u32;
-            self.damage(p, (mh + 1) / 2, Some(p), DmgKind::Indirect);
+            self.damage_from(p, (mh + 1) / 2, Some(p), DmgKind::Indirect, LogFrom::RawMove(am.id));
             if self.is_live(p) && (self.m(p).hp as u32) * 2 <= mh && hp0 * 2 > mh {
                 self.emergency_exit(p);
             }
@@ -3004,15 +3079,16 @@ impl Battle {
         let hp0 = self.m(p).hp as u32;
         if mv.struggle_recoil || am.struggle {
             let r = ((mh as f64) / 4.0).round() as u32;
-            self.damage(p, r.max(1), Some(p), DmgKind::SelfCost);
+            self.damage_from(p, r.max(1), Some(p), DmgKind::SelfCost, LogFrom::StruggleRecoil);
         } else if mv.mind_blown_recoil {
-            self.damage(p, (mh + 1) / 2, Some(p), DmgKind::Indirect);
+            // Pinned conditions.get(move.name) has no condition: the raw id is named.
+            self.damage_from(p, (mh + 1) / 2, Some(p), DmgKind::Indirect, LogFrom::RawMove(am.id));
         } else if mv.recoil.0 > 0 {
             if matches!(self.ab(p), Ab::RockHead | Ab::MagicGuard) {
                 return;
             }
             let r = ((dealt as f64) * mv.recoil.0 as f64 / mv.recoil.1 as f64).round() as u32;
-            self.damage(p, r.max(1), Some(p), DmgKind::Indirect);
+            self.damage_from(p, r.max(1), Some(p), DmgKind::Indirect, LogFrom::Cond("Recoil"));
         } else {
             return;
         }
@@ -3021,14 +3097,15 @@ impl Battle {
         }
     }
 
-    /// A drain heal (`heal(amount, .., 'drain')`): Big Root multiplies it by
-    /// 5324/4096; an amount of 0 heals nothing.
-    pub(crate) fn drain_heal(&mut self, p: Pos, h: u32) -> u32 {
+    /// A heal through pinned Big Root's onTryHeal list (drain, Leech Seed, Ingrain, Aqua Ring,
+    /// Strength Sap): Big Root multiplies it by 5324/4096; an amount of 0 heals nothing.
+    /// `from` / `src` render the line as `heal_from` does.
+    pub(crate) fn drain_heal(&mut self, p: Pos, h: u32, from: LogFrom, src: Option<Pos>) -> u32 {
         if h == 0 || !self.is_live(p) {
             return 0;
         }
         let h = if self.it(p) == It::BigRoot { super::calc::modify(h, 5324, 4096) } else { h };
-        self.heal(p, h)
+        self.heal_from(p, h, from, src)
     }
 }
 

@@ -162,6 +162,9 @@ pub struct Vol {
     pub last_damage_src: u8,
     /// Switch out at the end of the current action (U-turn, Emergency Exit...).
     pub switch_flag: bool,
+    /// The self-switch move behind the flag (pinned `switchFlag = move.id`), named in the
+    /// switch line as `[from] Move`; 0 for forced switches.
+    pub switch_move: crate::dex::MoveId,
     /// BeforeSwitchOut already ran for this pending switch (skipBeforeSwitchOutEventFlag).
     pub skip_before_switch_out: bool,
     pub switch_copyvolatile: bool,

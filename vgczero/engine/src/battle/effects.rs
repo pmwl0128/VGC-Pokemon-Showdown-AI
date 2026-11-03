@@ -42,6 +42,42 @@ pub enum DmgKind {
     SelfCost,
 }
 
+/// The effect behind a damage / heal line, for contract-5 rendering (pinned sim/battle.ts
+/// spreadDamage, Battle.heal and directDamage suffixes). `[of]` follows the pinned rules: a
+/// damage line names any source (an ability's even when source == target), a heal line only a
+/// distinct one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LogFrom {
+    /// No suffix: directDamage callers and move-typed heals.
+    None,
+    /// `[silent]` (Rest and Leech Seed heals).
+    Silent,
+    /// `[from] confusion` (the literal, pinned directDamage).
+    Confusion,
+    /// `[from] recoil` (Struggle, pinned directDamage).
+    StruggleRecoil,
+    /// `[from] drain`, with the damaged foe as `[of]`.
+    Drain,
+    /// A condition, weather or status: `[from] NAME`.
+    Cond(&'static str),
+    /// `[from] item: NAME`.
+    Item(&'static str),
+    /// `[from] ability: NAME`.
+    Ability(&'static str),
+    /// `[from] <move id>`: pinned conditions.get(move.name) finds no condition and falls back
+    /// to the raw id (jump-kick crashes, Steel Beam / Mind Blown recoil).
+    RawMove(crate::dex::MoveId),
+}
+
+/// The effect behind a `-status` line (pinned status onStart handlers; the Champions slp
+/// handler names a move source, every handler names an ability source).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StatusFrom {
+    Plain,
+    Move(crate::dex::MoveId),
+    Ability(&'static str),
+}
+
 const STAT_NAMES: [&str; 7] = ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"];
 
 impl Battle {
@@ -210,6 +246,8 @@ impl Battle {
                 }
             }
             blog!(self, "|-enditem|{}|White Herb", self.name(p));
+            // Pinned whiteherb.onUse.
+            blog!(self, "|-clearnegativeboost|{}|[silent]", self.name(p));
             self.consume_item(p);
         }
     }
@@ -295,16 +333,27 @@ impl Battle {
 
     /// Try to inflict a major status. Returns true on success.
     pub fn try_set_status(&mut self, tgt: Pos, st: Status, src: Option<Pos>) -> bool {
-        self.set_status_inner(tgt, st, src, false)
+        self.set_status_inner(tgt, st, src, false, StatusFrom::Plain)
+    }
+
+    /// `try_set_status` naming the effect in the `-status` line (`[from] move:` / `[from]
+    /// ability:`, pinned status onStart handlers).
+    pub fn try_set_status_from(&mut self, tgt: Pos, st: Status, src: Option<Pos>, from: StatusFrom) -> bool {
+        self.set_status_inner(tgt, st, src, false, from)
     }
 
     /// Pinned Pokemon.setStatus as Rest calls it: a different existing status is replaced
     /// (trySetStatus is what refuses a statused Pokemon); the same status still fails.
     pub fn set_status_over(&mut self, tgt: Pos, st: Status, src: Option<Pos>) -> bool {
-        self.set_status_inner(tgt, st, src, true)
+        self.set_status_inner(tgt, st, src, true, StatusFrom::Plain)
     }
 
-    fn set_status_inner(&mut self, tgt: Pos, st: Status, src: Option<Pos>, overwrite: bool) -> bool {
+    /// `set_status_over` naming the effect in the `-status` line.
+    pub fn set_status_over_from(&mut self, tgt: Pos, st: Status, src: Option<Pos>, from: StatusFrom) -> bool {
+        self.set_status_inner(tgt, st, src, true, from)
+    }
+
+    fn set_status_inner(&mut self, tgt: Pos, st: Status, src: Option<Pos>, overwrite: bool, from: StatusFrom) -> bool {
         if !self.is_live(tgt) || st == Status::None {
             return false;
         }
@@ -328,7 +377,17 @@ impl Battle {
             m.status = st;
             m.status_turns = turns;
         }
-        blog!(self, "|-status|{}|{:?}", self.name(tgt), st);
+        // Pinned status onStart: an ability source is named with `[of]`; the Champions slp
+        // handler also names a move source; everything else is the bare status id.
+        let suffix = match from {
+            StatusFrom::Move(mv) if st == Status::Slp => format!("|[from] move: {}", self.dex.mv(mv).name),
+            StatusFrom::Ability(n) => match src {
+                Some(s) => format!("|[from] ability: {}|[of] {}", n, self.name(s)),
+                None => format!("|[from] ability: {}", n),
+            },
+            _ => String::new(),
+        };
+        blog!(self, "|-status|{}|{}{}", self.name(tgt), st.id(), suffix);
         // Synchronize.
         if let Some(s) = src {
             if s.side != tgt.side
@@ -377,7 +436,7 @@ impl Battle {
                 It::PersimBerry => self.mm(p).vol.confusion = 0,
                 _ => self.cure_status(p),
             }
-            blog!(self, "|-enditem|{}|berry|[eat]", self.name(p));
+            blog!(self, "|-enditem|{}|{}|[eat]", self.name(p), self.dex.item(self.m(p).item).name);
             self.eat_item(p);
         }
     }
@@ -618,7 +677,10 @@ impl Battle {
             }
             VolKind::Endure => self.mm(tgt).vol.endure = true,
             VolKind::DestinyBond => self.mm(tgt).vol.destiny_bond = true,
-            VolKind::Protect => self.mm(tgt).vol.protect = ProtectKind::Protect,
+            VolKind::Protect => {
+                self.mm(tgt).vol.protect = ProtectKind::Protect;
+                blog!(self, "|-singleturn|{}|Protect", self.name(tgt));
+            }
             // Volatiles applied by scripted moves themselves.
             VolKind::Encore
             | VolKind::Disable
@@ -634,8 +696,42 @@ impl Battle {
 
     // ---- HP ------------------------------------------------------------------------------
 
+    /// The trailing arguments of a pinned damage / heal line (spreadDamage / Battle.heal in
+    /// sim/battle.ts): the `[from]` effect and the `[of]` source.
+    fn log_suffix(&self, tgt: Pos, src: Option<Pos>, from: LogFrom, damage: bool) -> String {
+        let of = |s: Pos| format!("|[of] {}", self.name(s));
+        match from {
+            LogFrom::None => String::new(),
+            LogFrom::Silent => "|[silent]".to_string(),
+            LogFrom::Confusion => "|[from] confusion".to_string(),
+            LogFrom::StruggleRecoil => "|[from] recoil".to_string(),
+            LogFrom::Drain => match src {
+                Some(s) => format!("|[from] drain{}", of(s)),
+                None => "|[from] drain".to_string(),
+            },
+            LogFrom::Cond(n) => match src {
+                Some(s) if s != tgt => format!("|[from] {}{}", n, of(s)),
+                _ => format!("|[from] {}", n),
+            },
+            LogFrom::Item(n) => match src {
+                Some(s) if s != tgt => format!("|[from] item: {}{}", n, of(s)),
+                _ => format!("|[from] item: {}", n),
+            },
+            LogFrom::Ability(n) => match src {
+                Some(s) if damage || s != tgt => format!("|[from] ability: {}{}", n, of(s)),
+                _ => format!("|[from] ability: {}", n),
+            },
+            LogFrom::RawMove(id) => format!("|[from] {}", self.dex.mv(id).id),
+        }
+    }
+
     /// Deal damage. Returns damage actually dealt.
     pub fn damage(&mut self, tgt: Pos, amount: u32, src: Option<Pos>, kind: DmgKind) -> u32 {
+        self.damage_from(tgt, amount, src, kind, LogFrom::None)
+    }
+
+    /// Deal damage, naming `from` (and `src`) in the `-damage` line as pinned does.
+    pub fn damage_from(&mut self, tgt: Pos, amount: u32, src: Option<Pos>, kind: DmgKind, from: LogFrom) -> u32 {
         if !self.is_live(tgt) || amount == 0 {
             return 0;
         }
@@ -676,15 +772,19 @@ impl Battle {
             m.vol.hurt_this_turn = true;
         }
         let hp = m.hp;
-        blog!(self, "|-damage|{}|{}", self.name(tgt), self.hp_text(tgt));
+        blog!(self, "|-damage|{}|{}{}", self.name(tgt), self.hp_text(tgt), self.log_suffix(tgt, src, from, true));
         if hp == 0 {
             self.queue_faint(tgt);
         }
-        let _ = src;
         dmg
     }
 
     pub fn heal(&mut self, tgt: Pos, amount: u32) -> u32 {
+        self.heal_from(tgt, amount, LogFrom::None, None)
+    }
+
+    /// Heal, naming `from` (and `src`) in the `-heal` line as pinned does.
+    pub fn heal_from(&mut self, tgt: Pos, amount: u32, from: LogFrom, src: Option<Pos>) -> u32 {
         if !self.is_live(tgt) || amount == 0 {
             return 0;
         }
@@ -696,7 +796,7 @@ impl Battle {
         let h = amount.min(room);
         m.hp += h as u16;
         if h > 0 {
-            blog!(self, "|-heal|{}|{}", self.name(tgt), self.hp_text(tgt));
+            blog!(self, "|-heal|{}|{}{}", self.name(tgt), self.hp_text(tgt), self.log_suffix(tgt, src, from, false));
         }
         h
     }
@@ -717,11 +817,12 @@ impl Battle {
                 let amt = m.max_hp as u32 / 4;
                 blog!(self, "|-enditem|{}|Sitrus Berry|[eat]", self.name(p));
                 self.eat_item(p);
-                self.heal(p, amt);
+                self.heal_from(p, amt, LogFrom::Item("Sitrus Berry"), None);
             }
             It::OranBerry if (m.hp as u32) * 2 <= m.max_hp as u32 => {
+                blog!(self, "|-enditem|{}|Oran Berry|[eat]", self.name(p));
                 self.eat_item(p);
-                self.heal(p, 10);
+                self.heal_from(p, 10, LogFrom::Item("Oran Berry"), None);
             }
             _ => {}
         }
@@ -780,7 +881,7 @@ impl Battle {
             self.mm(p).set_alt_forme(true);
             self.mm(p).alt_locked = true;
             let eighth = (self.m(p).max_hp / 8) as u32;
-            self.damage(p, eighth, Some(p), DmgKind::Indirect);
+            self.damage_from(p, eighth, Some(p), DmgKind::Indirect, LogFrom::Ability("Disguise"));
         }
         if self.m(p).item == 0 {
             return;
@@ -900,7 +1001,7 @@ impl Battle {
         if self.is_live(p) && self.ab(p) == Ab::CheekPouch {
             self.reveal_ability(p);
             let h = self.m(p).max_hp as u32 / 3;
-            self.heal(p, h);
+            self.heal_from(p, h, LogFrom::Ability("Cheek Pouch"), None);
         }
     }
 
@@ -932,6 +1033,15 @@ impl Battle {
         if matches!(self.ab(p), Ab::AirLock | Ab::CloudNine) {
             self.each_event_draws();
         }
+        // Supreme Overlord's End at the faint's clearVolatile (not being called back): the
+        // silent fallen counter ends.
+        let fallen_end = {
+            let m = &self.sides[p.s()].mons[self.sides[p.s()].active[p.i()] as usize];
+            if self.dex.ab(m.ability) == Ab::SupremeOverlord { m.vol.fallen } else { 0 }
+        };
+        if fallen_end > 0 {
+            blog!(self, "|-end|{}|fallen{}|[silent]", name, fallen_end);
+        }
         {
             let side = &mut self.sides[p.s()];
             side.total_fainted = side.total_fainted.saturating_add(1);
@@ -956,7 +1066,31 @@ impl Battle {
 
     // ---- field ----------------------------------------------------------------------------
 
-    pub fn set_weather(&mut self, w: Weather, src: Pos) -> bool {
+    /// A weather's name in `-weather` lines (pinned data/conditions.ts).
+    pub(crate) fn weather_id(w: Weather) -> &'static str {
+        match w {
+            Weather::Rain => "RainDance",
+            Weather::Sun => "SunnyDay",
+            Weather::Sand => "Sandstorm",
+            Weather::Snow => "Snowscape",
+            Weather::None => "none",
+        }
+    }
+
+    /// A terrain's name in `-fieldstart` / `-fieldend` lines (pinned data/moves.ts conditions).
+    pub(crate) fn terrain_name(t: Terrain) -> &'static str {
+        match t {
+            Terrain::Grassy => "Grassy Terrain",
+            Terrain::Psychic => "Psychic Terrain",
+            Terrain::Electric => "Electric Terrain",
+            Terrain::Misty => "Misty Terrain",
+            Terrain::None => "none",
+        }
+    }
+
+    /// `ability`: set by `src`'s ability (pinned onFieldStart names it with `[of]`); a move
+    /// writes the bare line.
+    pub fn set_weather(&mut self, w: Weather, src: Pos, ability: bool) -> bool {
         if self.field.weather == w {
             return false;
         }
@@ -966,7 +1100,12 @@ impl Battle {
         };
         self.field.weather = w;
         self.field.weather_turns = if rock { 8 } else { 5 };
-        blog!(self, "|-weather|{:?}", w);
+        if ability {
+            let aname = self.dex.ability(self.m(src).ability).name.clone();
+            blog!(self, "|-weather|{}|[from] ability: {}|[of] {}", Self::weather_id(w), aname, self.name(src));
+        } else {
+            blog!(self, "|-weather|{}", Self::weather_id(w));
+        }
         // eachEvent('WeatherChange').
         self.each_event_draws();
         true
@@ -989,20 +1128,27 @@ impl Battle {
         if self.field.terrain == Terrain::None {
             return false;
         }
-        blog!(self, "|-fieldend|{:?}", self.field.terrain);
+        blog!(self, "|-fieldend|move: {}", Self::terrain_name(self.field.terrain));
         self.field.terrain = Terrain::None;
         self.field.terrain_turns = 0;
         self.each_event_draws();
         true
     }
 
-    pub fn set_terrain(&mut self, t: Terrain, src: Pos) -> bool {
+    /// `ability`: set by `src`'s ability (pinned onFieldStart names it with `[of]`); a move
+    /// writes the bare line.
+    pub fn set_terrain(&mut self, t: Terrain, src: Pos, ability: bool) -> bool {
         if self.field.terrain == t {
             return false;
         }
         self.field.terrain = t;
         self.field.terrain_turns = if self.it(src) == It::TerrainExtender { 8 } else { 5 };
-        blog!(self, "|-fieldstart|{:?}", t);
+        if ability {
+            let aname = self.dex.ability(self.m(src).ability).name.clone();
+            blog!(self, "|-fieldstart|move: {}|[from] ability: {}|[of] {}", Self::terrain_name(t), aname, self.name(src));
+        } else {
+            blog!(self, "|-fieldstart|move: {}", Self::terrain_name(t));
+        }
         // eachEvent('TerrainChange').
         self.each_event_draws();
         // Seeds activate when their terrain starts.

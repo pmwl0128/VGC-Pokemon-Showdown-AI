@@ -437,6 +437,11 @@ impl Battle {
                         self.sides[s].mons[mi].reveal.seen = true;
                     }
                 }
+                // Pinned runAction 'start': each side's team size, then `|start`.
+                for s in 0..2 {
+                    let n = self.sides[s].mons.iter().filter(|m| m.brought).count();
+                    blog!(self, "|teamsize|p{}|{}", s + 1, n);
+                }
                 blog!(self, "|start");
                 // commitChoices sorts the team actions (order 1, priority -index, speed =
                 // getActionSpeed: the raw Speed stat before the battle starts): same-index
@@ -729,6 +734,7 @@ impl Battle {
                         }
                         if mv.fx == crate::kinds::MoveFx::FocusPunch {
                             self.mm(p).vol.focus_punch = 1;
+                            blog!(self, "|-singleturn|{}|move: Focus Punch", self.name(p));
                         }
                         // A recharge turn is Showdown's 'recharge' move: priority 0, target self.
                         if recharge {
@@ -889,6 +895,7 @@ impl Battle {
         }
         if d.mv(move_id).fx == crate::kinds::MoveFx::FocusPunch {
             self.mm(p).vol.focus_punch = 1;
+            blog!(self, "|-singleturn|{}|move: Focus Punch", self.name(p));
         }
         let mut a = Action {
             kind: ActionKind::Move { mslot: mslot as u8, target: TARGET_RANDOM, recharge: false },
@@ -1084,7 +1091,12 @@ impl Battle {
             (true, true) => None,
         };
         if let Some(w) = w {
-            blog!(self, "|win|{}", w);
+            // Pinned win(side) names the side; a draw is `|tie`.
+            if w < 2 {
+                blog!(self, "|win|p{}", w + 1);
+            } else {
+                blog!(self, "|tie");
+            }
             self.winner = Some(w);
             self.phase = Phase::Ended;
         }

@@ -447,6 +447,7 @@ impl Battle {
             Value::String(x) => {
                 // Showdown stores the move id (or the selfSwitch kind).
                 v.switch_flag = true;
+                v.switch_move = d.move_id(x).unwrap_or(0);
                 let kind = d.move_id(x).map(|mid| d.mv(mid).self_switch).unwrap_or(0);
                 match (x.as_str(), kind) {
                     ("copyvolatile", _) | (_, 2) => v.switch_copyvolatile = true,

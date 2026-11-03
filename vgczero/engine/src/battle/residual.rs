@@ -2,7 +2,7 @@
 //! field, sides and Pokemon is sorted by (order, speed desc, subOrder), and
 //! durations tick at their handler's slot.
 
-use super::effects::{BoostSrc, DmgKind};
+use super::effects::{BoostSrc, DmgKind, LogFrom};
 use super::ties::{Ev, Hk, Whitelist};
 use super::{blog, Battle};
 use crate::dex::{Cond, Status, Terrain, Weather, B_SPE};
@@ -393,6 +393,8 @@ impl Battle {
                     return;
                 }
                 let w = self.weather();
+                // Pinned onFieldResidual: the upkeep line, then eachEvent('Weather').
+                blog!(self, "|-weather|{}|[upkeep]", Self::weather_id(w));
                 // Weather effects on each active Pokemon, by speed.
                 // eachEvent('Weather') then eachEvent('Update'); Pokemon faint
                 // only after the whole handler (fieldEvent's faintMessages).
@@ -423,7 +425,13 @@ impl Battle {
             Res::LightScreen => self.sides[code as usize].conds.light_screen = self.sides[code as usize].conds.light_screen.saturating_sub(1),
             Res::Safeguard => self.sides[code as usize].conds.safeguard = self.sides[code as usize].conds.safeguard.saturating_sub(1),
             Res::Mist => self.sides[code as usize].conds.mist = self.sides[code as usize].conds.mist.saturating_sub(1),
-            Res::Tailwind => self.sides[code as usize].conds.tailwind = self.sides[code as usize].conds.tailwind.saturating_sub(1),
+            Res::Tailwind => {
+                let c = &mut self.sides[code as usize].conds;
+                c.tailwind = c.tailwind.saturating_sub(1);
+                if c.tailwind == 0 {
+                    blog!(self, "|-sideend|p{}: p{}|move: Tailwind", code + 1, code + 1);
+                }
+            }
             Res::AuroraVeil => self.sides[code as usize].conds.aurora_veil = self.sides[code as usize].conds.aurora_veil.saturating_sub(1),
             Res::WideGuard => self.sides[code as usize].conds.wide_guard = false,
             Res::QuickGuard => self.sides[code as usize].conds.quick_guard = false,
@@ -461,27 +469,32 @@ impl Battle {
                     || m.has_type(Type::Steel)
                     || matches!(ab, Ab::SandVeil | Ab::SandRush | Ab::SandForce | Ab::Overcoat | Ab::MagicGuard);
                 if !immune {
-                    self.damage(p, (mh / 16).max(1), None, DmgKind::Indirect);
+                    self.damage_from(p, (mh / 16).max(1), None, DmgKind::Indirect, LogFrom::Cond("Sandstorm"));
                 }
             }
             Weather::Rain => match ab {
                 Ab::RainDish => {
-                    self.heal(p, (mh / 16).max(1));
+                    self.heal_from(p, (mh / 16).max(1), LogFrom::Ability("Rain Dish"), Some(p));
                 }
                 Ab::DrySkin => {
-                    self.heal(p, (mh / 8).max(1));
+                    self.heal_from(p, (mh / 8).max(1), LogFrom::Ability("Dry Skin"), Some(p));
                 }
                 _ => {}
             },
             Weather::Sun => match ab {
-                Ab::DrySkin | Ab::SolarPower => {
-                    self.damage(p, (mh / 8).max(1), None, DmgKind::Indirect);
+                // Pinned `this.damage(baseMaxhp / 8, target, target)`: an ability's damage
+                // line names the holder as `[of]`.
+                Ab::DrySkin => {
+                    self.damage_from(p, (mh / 8).max(1), Some(p), DmgKind::Indirect, LogFrom::Ability("Dry Skin"));
+                }
+                Ab::SolarPower => {
+                    self.damage_from(p, (mh / 8).max(1), Some(p), DmgKind::Indirect, LogFrom::Ability("Solar Power"));
                 }
                 _ => {}
             },
             Weather::Snow => {
                 if ab == Ab::IceBody {
-                    self.heal(p, (mh / 16).max(1));
+                    self.heal_from(p, (mh / 16).max(1), LogFrom::Ability("Ice Body"), Some(p));
                 }
             }
             Weather::None => {}
@@ -543,7 +556,7 @@ impl Battle {
         match kind {
             Res::GrassyHeal => {
                 if self.field.terrain == Terrain::Grassy && self.is_grounded(p) && self.m(p).vol.semi_inv == crate::state::SemiInv::None {
-                    self.heal(p, (mh / 16).max(1));
+                    self.heal_from(p, (mh / 16).max(1), LogFrom::Cond("Grassy Terrain"), None);
                 }
             }
             Res::Healer => {
@@ -558,10 +571,13 @@ impl Battle {
                 if self.m(p).hp < self.m(p).max_hp {
                     self.reveal_item(p);
                 }
-                self.heal(p, (mh / 16).max(1));
+                self.heal_from(p, (mh / 16).max(1), LogFrom::Item("Leftovers"), None);
             }
-            Res::AquaRing | Res::Ingrain => {
-                self.drain_heal(p, (mh / 16).max(1));
+            Res::AquaRing => {
+                self.drain_heal(p, (mh / 16).max(1), LogFrom::Cond("Aqua Ring"), None);
+            }
+            Res::Ingrain => {
+                self.drain_heal(p, (mh / 16).max(1), LogFrom::Cond("Ingrain"), None);
             }
             Res::LeechSeed => {
                 // Nothing happens if the seeder's slot is empty or fainted;
@@ -570,9 +586,11 @@ impl Battle {
                 if !self.is_live(src) {
                     return;
                 }
-                let dealt = self.damage(p, (mh / 8).max(1), Some(src), DmgKind::Indirect);
+                let dealt = self.damage_from(p, (mh / 8).max(1), Some(src), DmgKind::Indirect, LogFrom::Cond("Leech Seed"));
                 if dealt > 0 && self.is_live(src) {
-                    self.drain_heal(src, dealt);
+                    // Pinned heal(damage, seeder, seeded) with the leechseed effect: a silent
+                    // line; Big Root still applies.
+                    self.drain_heal(src, dealt, LogFrom::Silent, None);
                 }
             }
             Res::Poison => {
@@ -586,23 +604,24 @@ impl Battle {
                 } else {
                     (mh / 8).max(1)
                 };
-                self.damage(p, dmg, None, DmgKind::Indirect);
+                // Pinned spreadDamage renders tox as psn.
+                self.damage_from(p, dmg, None, DmgKind::Indirect, LogFrom::Cond("psn"));
             }
             Res::Burn => {
                 let mut dmg = (mh / 16).max(1);
                 if self.ab(p) == Ab::Heatproof {
                     dmg /= 2;
                 }
-                self.damage(p, dmg, None, DmgKind::Indirect);
+                self.damage_from(p, dmg, None, DmgKind::Indirect, LogFrom::Cond("brn"));
             }
             Res::Curse => {
-                self.damage(p, (mh / 4).max(1), None, DmgKind::Indirect);
+                self.damage_from(p, (mh / 4).max(1), None, DmgKind::Indirect, LogFrom::Cond("Curse"));
             }
             Res::SaltCure => {
                 // Champions: 1/16 (1/8 for Water and Steel types).
                 let m = self.m(p);
                 let frac = if m.has_type(Type::Water) || m.has_type(Type::Steel) { 8 } else { 16 };
-                self.damage(p, (mh / frac).max(1), None, DmgKind::Indirect);
+                self.damage_from(p, (mh / frac).max(1), None, DmgKind::Indirect, LogFrom::Cond("Salt Cure"));
             }
             Res::PartialTrap => {
                 // Duration ticks first; then it ends if the trapper left.
@@ -638,13 +657,16 @@ impl Battle {
                 }
             }
             Res::PerishSong => {
-                let m = self.mm(p);
-                m.vol.perish -= 1;
-                let left = m.vol.perish;
+                let left = {
+                    let m = self.mm(p);
+                    m.vol.perish -= 1;
+                    m.vol.perish
+                };
                 blog!(self, "|-start|{}|perish{}", self.name(p), left);
                 if left == 0 {
-                    let hp = self.m(p).hp as u32;
-                    self.damage(p, hp, None, DmgKind::SelfCost);
+                    // Pinned onEnd: `perish0`, then faint() (no damage line).
+                    self.mm(p).hp = 0;
+                    self.queue_faint(p);
                 }
             }
             Res::SpeedBoost => {
@@ -655,6 +677,8 @@ impl Battle {
                 let mut up = [0i8; 7];
                 up[B_SPE] = 1;
                 self.reveal_ability(p);
+                // Pinned boost reporting names the ability behind the boost first.
+                blog!(self, "|-ability|{}|Speed Boost|boost", self.name(p));
                 self.boost(p, &up, BoostSrc::SelfInflicted);
             }
             Res::Moody => {

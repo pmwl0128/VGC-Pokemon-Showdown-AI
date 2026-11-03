@@ -1,6 +1,6 @@
 //! Switching out and in, and switch-in effects.
 
-use super::effects::{BoostSrc, DmgKind};
+use super::effects::{BoostSrc, DmgKind, LogFrom};
 use super::{blog, Battle};
 use crate::dex::{Status, Terrain, Weather, B_SPE};
 use crate::kinds::{Ab, It};
@@ -20,6 +20,9 @@ impl Battle {
     pub fn switch_out_in(&mut self, p: Pos, to: usize) {
         let s = p.s();
         let old = self.sides[s].active[p.i()];
+        // A self-switch move names itself in the switch line (pinned switchIn's sourceEffect);
+        // read before the leaving Pokemon's volatiles are cleared.
+        let from_move = if old != crate::state::NO_MON { self.sides[s].mons[old as usize].vol.switch_move } else { 0 };
         let mut baton: Option<(crate::dex::Boosts, Vol)> = None;
         if old != crate::state::NO_MON {
             let oi = old as usize;
@@ -115,7 +118,11 @@ impl Battle {
             let pick = self.illusion_target(p.s(), p.i());
             self.mm(p).vol.illusion_species = pick;
         }
-        blog!(self, "|switch|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
+        if from_move != 0 {
+            blog!(self, "|switch|{}|{}|{}|[from] {}", self.name(p), self.details(p), self.hp_text(p), self.dex.mv(from_move).name);
+        } else {
+            blog!(self, "|switch|{}|{}|{}", self.name(p), self.details(p), self.hp_text(p));
+        }
     }
 
     /// Pinned `Battle.swapPosition` (sim/battle.ts:1592) as Ally Switch uses it: the user and
@@ -302,7 +309,7 @@ impl Battle {
                 -1 => mh / 16,
                 _ => mh / 32,
             };
-            self.damage(p, dmg.max(1), None, DmgKind::Indirect);
+            self.damage_from(p, dmg.max(1), None, DmgKind::Indirect, LogFrom::Cond("Stealth Rock"));
         }
         if conds.toxic_spikes > 0 && self.is_live(p) && self.is_grounded(p) {
             if self.m(p).has_type(Type::Poison) {
@@ -319,7 +326,7 @@ impl Battle {
                 2 => mh / 6,
                 _ => mh / 4,
             };
-            self.damage(p, dmg, None, DmgKind::Indirect);
+            self.damage_from(p, dmg, None, DmgKind::Indirect, LogFrom::Cond("Spikes"));
         }
         if conds.sticky_web && self.is_live(p) && self.is_grounded(p) {
             let mut d = [0i8; 7];
@@ -355,42 +362,43 @@ impl Battle {
             }
             Ab::Drizzle => {
                 self.reveal_ability(p);
-                self.set_weather(Weather::Rain, p);
+                self.set_weather(Weather::Rain, p, true);
             }
             Ab::Drought => {
                 self.reveal_ability(p);
-                self.set_weather(Weather::Sun, p);
+                self.set_weather(Weather::Sun, p, true);
             }
             Ab::SandStream => {
                 self.reveal_ability(p);
-                self.set_weather(Weather::Sand, p);
+                self.set_weather(Weather::Sand, p, true);
             }
             Ab::SnowWarning => {
                 self.reveal_ability(p);
-                self.set_weather(Weather::Snow, p);
+                self.set_weather(Weather::Snow, p, true);
             }
             Ab::GrassySurge => {
                 self.reveal_ability(p);
-                self.set_terrain(Terrain::Grassy, p);
+                self.set_terrain(Terrain::Grassy, p, true);
             }
             Ab::PsychicSurge => {
                 self.reveal_ability(p);
-                self.set_terrain(Terrain::Psychic, p);
+                self.set_terrain(Terrain::Psychic, p, true);
             }
             Ab::ElectricSurge => {
                 self.reveal_ability(p);
-                self.set_terrain(Terrain::Electric, p);
+                self.set_terrain(Terrain::Electric, p, true);
             }
             Ab::MistySurge => {
                 self.reveal_ability(p);
-                self.set_terrain(Terrain::Misty, p);
+                self.set_terrain(Terrain::Misty, p, true);
             }
             Ab::Hospitality => {
                 if let Some(a) = self.live_ally(p) {
                     let amt = self.m(a).max_hp as u32 / 4;
                     if self.m(a).hp < self.m(a).max_hp {
                         self.reveal_ability(p);
-                        self.heal(a, amt);
+                        // Pinned heal(ally.baseMaxhp / 4, ally, pokemon): the holder is `[of]`.
+                        self.heal_from(a, amt, LogFrom::Ability("Hospitality"), Some(p));
                     }
                 }
             }
@@ -424,7 +432,16 @@ impl Battle {
             Ab::SupremeOverlord => {
                 fallen = self.sides[p.s()].total_fainted.min(5);
             }
-            Ab::FairyAura | Ab::Pressure | Ab::Unnerve | Ab::MoldBreaker => {
+            // Pinned onStart handlers that announce the ability.
+            Ab::FairyAura => {
+                self.reveal_ability(p);
+                blog!(self, "|-ability|{}|Fairy Aura", self.name(p));
+            }
+            Ab::Unnerve => {
+                self.reveal_ability(p);
+                blog!(self, "|-ability|{}|Unnerve", self.name(p));
+            }
+            Ab::Pressure | Ab::MoldBreaker => {
                 self.reveal_ability(p);
             }
             // onStart: eachEvent('WeatherChange') (also on its End).
@@ -441,6 +458,11 @@ impl Battle {
         }
         if ab == Ab::SupremeOverlord {
             self.mm(p).vol.fallen = fallen;
+            // Pinned onStart: the activation, then the silent fallen counter.
+            if fallen > 0 {
+                blog!(self, "|-activate|{}|ability: Supreme Overlord", self.name(p));
+                blog!(self, "|-start|{}|fallen{}|[silent]", self.name(p), fallen);
+            }
         }
     }
 
