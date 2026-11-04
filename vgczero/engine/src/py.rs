@@ -361,7 +361,7 @@ impl PyBattle {
             t.get(team_a).ok_or_else(|| PyValueError::new_err("bad team_a"))?,
             t.get(team_b).ok_or_else(|| PyValueError::new_err("bad team_b"))?,
         );
-        let cfg = BattleConfig { turn_limit, ally_damage_targeting: false, log, sheets: [sheets.0, sheets.1] };
+        let cfg = BattleConfig { turn_limit, ally_damage_targeting: false, log, sheets: [sheets.0, sheets.1], log_side: None };
         Ok(PyBattle { b: Battle::new([a, b], seed, cfg) })
     }
 

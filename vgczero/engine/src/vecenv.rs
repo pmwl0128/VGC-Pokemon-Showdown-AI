@@ -104,6 +104,7 @@ impl VecEnv {
             ally_damage_targeting: self.cfg.ally_damage_targeting,
             log: false,
             sheets: [rng.f32() < self.cfg.open_sheet_prob, rng.f32() < self.cfg.open_sheet_prob],
+            log_side: None,
         };
         let seed = rng.next_u64();
         (Battle::new([&self.teams[a], &self.teams[b]], seed, cfg), [a as u32, b as u32])
@@ -220,6 +221,7 @@ impl VecEnv {
                         ally_damage_targeting: cfg.ally_damage_targeting,
                         log: false,
                         sheets: [env.rng.f32() < cfg.open_sheet_prob, env.rng.f32() < cfg.open_sheet_prob],
+                        log_side: None,
                     };
                     let seed = env.rng.next_u64();
                     env.battle = Battle::new([&teams[ta], &teams[tb]], seed, bc);

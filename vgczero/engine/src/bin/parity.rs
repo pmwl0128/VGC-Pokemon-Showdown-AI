@@ -123,10 +123,16 @@ fn main() {
                     // Team preview: construct from the initial seed like Showdown does.
                     let tv = line.get("teams").and_then(|x| x.as_array()).ok_or("no teams")?;
                     let teams: Vec<vgczero_engine::TeamSpec> = tv.iter().map(vgczero_engine::teams::parse_team).collect();
-                    let cfg = vgczero_engine::BattleConfig { turn_limit: 1000, ally_damage_targeting: true, log: true, sheets: [false, false] };
+                    let cfg = vgczero_engine::BattleConfig { turn_limit: 1000, ally_damage_targeting: true, log: true, sheets: [false, false], log_side: None };
                     Battle::with_rng([&teams[0], &teams[1]], rng, cfg)
                 }
             };
+            // Optional per-side rendering: log_side 0/1 renders own HP exact, the other side's as
+            // the Champions shared percentage (episode_match's per-side channel).
+            if let Some(s) = line.get("log_side").and_then(|x| x.as_u64()) {
+                b.cfg.log = true;
+                b.cfg.log_side = Some(s as u8);
+            }
             let cs = line.get("choices").and_then(|x| x.as_array()).ok_or("no choices")?;
             let choices = [choice_from_json(&cs[0])?, choice_from_json(&cs[1])?];
             let log0 = b.log_lines.len();
@@ -141,12 +147,41 @@ fn main() {
             Ok(json!({"features": b.outcome_features(log0), "draws": draws, "log": b.log_lines[log0..].to_vec(),
                 "seed_after": b.rng.showdown_seed()}))
         }),
+        // Whole-episode, same-seed lockstep (FE-T 4 `episode_match`). One continuous engine run from
+        // the initial teams+seed, applying a pre-recorded sequence of per-decision-point choices
+        // (the ones Showdown made in the same game). Emits the per-step log so the caller can compare
+        // each decision point's channel; a step that errors stops the run and is reported.
+        "episode" => each_line(&mut out, |line| {
+            let seed = line.get("seed").and_then(|x| x.as_str()).ok_or("no seed")?;
+            let rng = vgczero_engine::rng::Rng::from_showdown_seed(seed)?;
+            let tv = line.get("teams").and_then(|x| x.as_array()).ok_or("no teams")?;
+            let teams: Vec<vgczero_engine::TeamSpec> = tv.iter().map(vgczero_engine::teams::parse_team).collect();
+            let cfg = vgczero_engine::BattleConfig { turn_limit: 1000, ally_damage_targeting: true, log: true,
+                sheets: [false, false], log_side: line.get("log_side").and_then(|x| x.as_u64()).map(|s| s as u8) };
+            let mut b = Battle::with_rng([&teams[0], &teams[1]], rng, cfg);
+            let seq = line.get("choices").and_then(|x| x.as_array()).ok_or("no choices")?;
+            let mut steps: Vec<Value> = vec![];
+            let mut err: Option<String> = None;
+            let mut err_turn: Option<u16> = None;
+            for c in seq {
+                if b.ended() { break; }
+                let cs = c.as_array().ok_or("bad step choices")?;
+                let choices = [choice_from_json(&cs[0])?, choice_from_json(&cs[1])?];
+                let turn0 = b.turn;
+                let log0 = b.log_lines.len();
+                match b.step(choices) {
+                    Ok(()) => steps.push(json!({"turn": turn0, "log": b.log_lines[log0..].to_vec()})),
+                    Err(e) => { err = Some(e.0); err_turn = Some(turn0); break; }
+                }
+            }
+            Ok(json!({"steps": steps, "ended": b.ended(), "winner": b.winner, "err": err, "err_turn": err_turn, "turn": b.turn}))
+        }),
         "legal" => each_line(&mut out, |line| {
             let b = Battle::from_state_json(line.get("state").ok_or("no state")?, 1)?;
             Ok(json!({"sides": [b.legal_summary(0), b.legal_summary(1)]}))
         }),
         _ => {
-            eprintln!("usage: parity supported | damage | turn N | turnlog SEED | legal  (JSON lines on stdin)");
+            eprintln!("usage: parity supported | damage | turn N | turnlog SEED | exact | episode | legal  (JSON lines on stdin)");
             std::process::exit(2);
         }
     }

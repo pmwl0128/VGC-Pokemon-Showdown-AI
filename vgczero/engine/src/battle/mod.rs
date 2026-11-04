@@ -69,11 +69,14 @@ pub struct BattleConfig {
     pub log: bool,
     /// Open team sheets for side 0 / side 1 (each seen by the opponent).
     pub sheets: [bool; 2],
+    /// Render the log as this side sees it (own HP exact, the other side's as the Champions
+    /// shared percentage). `None` = the omniscient log (secret HP for both; the parity harness).
+    pub log_side: Option<u8>,
 }
 
 impl Default for BattleConfig {
     fn default() -> Self {
-        BattleConfig { turn_limit: 100, ally_damage_targeting: false, log: false, sheets: [false, false] }
+        BattleConfig { turn_limit: 100, ally_damage_targeting: false, log: false, sheets: [false, false], log_side: None }
     }
 }
 
@@ -574,7 +577,7 @@ impl Battle {
             "|-heal|p{}: {}|{}|[from] move: Revival Blessing",
             s + 1,
             self.dex.sp(self.sides[s].mons[to].species).base_species,
-            Self::hp_text_mon(&self.sides[s].mons[to])
+            if self.cfg.log_side.map(|ls| ls as usize != s).unwrap_or(false) { Self::hp_text_shared_mon(&self.sides[s].mons[to]) } else { Self::hp_text_mon(&self.sides[s].mons[to]) }
         );
         for slot in 0..2 {
             if self.sides[s].active[slot] as usize == to {
@@ -1139,6 +1142,29 @@ impl Battle {
         self.log_lines[i].push_str(attr);
     }
 
+    /// Pinned `getHealth().shared` (Champions): floor(100*hp/maxhp) or 1 as `pct/100`, then the
+    /// 20/50 threshold marker, then a status suffix.
+    pub fn hp_text_shared_mon(m: &crate::state::Mon) -> String {
+        if m.hp == 0 {
+            return "0 fnt".to_string();
+        }
+        let max = m.max_hp.max(1) as u32;
+        let mut pct = (100 * m.hp as u32 / max) as i32;
+        if pct == 0 { pct = 1; }
+        let mut s = format!("{pct}/100");
+        if pct == 20 {
+            s.push(if (m.hp as u32) * 5 > max { 'y' } else { 'r' });
+        } else if pct == 50 {
+            s.push(if (m.hp as u32) * 2 > max { 'g' } else { 'y' });
+        }
+        let st = m.status.id();
+        if !st.is_empty() {
+            s.push(' ');
+            s.push_str(st);
+        }
+        s
+    }
+
     /// Pinned `getHealth().secret`: `hp/maxhp`, a status suffix, `0 fnt` when fainted.
     pub fn hp_text_mon(m: &crate::state::Mon) -> String {
         if m.hp == 0 {
@@ -1152,8 +1178,14 @@ impl Battle {
         }
     }
 
+    /// The HP field as the configured viewer sees it: exact for its own side, the shared
+    /// percentage otherwise (the omniscient log with `log_side: None`).
     pub fn hp_text(&self, p: Pos) -> String {
-        Self::hp_text_mon(self.m(p))
+        if self.cfg.log_side.map(|ls| ls as usize != p.s()).unwrap_or(false) {
+            Self::hp_text_shared_mon(self.m(p))
+        } else {
+            Self::hp_text_mon(self.m(p))
+        }
     }
 
     /// Pinned `getUpdatedDetails`: species name, `, L<level>` unless 100, `, M`/`, F`; an

@@ -686,6 +686,10 @@ pub struct ItemData {
     /// The item's fling data: the status or volatile Fling inflicts with it (no chance).
     pub fling_status: Status,
     pub fling_volatile: Option<VolKind>,
+    /// `fling.effect`: the item applies a scripted effect on hit (White/Mental Herb). A flung
+    /// berry instead makes the target eat it. The engine models neither, so `set_support`
+    /// refuses a set that would fling such an item rather than appearing to support it.
+    pub fling_effect: bool,
     pub callbacks: Vec<String>,
     pub hooks: Hooks,
     pub unsupported: Vec<String>,
@@ -933,6 +937,12 @@ impl Dex {
                     .and_then(|x| x.as_str())
                     .map(VolKind::parse)
                     .filter(|v| *v != VolKind::Unsupported),
+                fling_effect: it
+                    .get("fling")
+                    .and_then(|f| f.get("callbacks"))
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.iter().any(|x| x.as_str() == Some("effect")))
+                    .unwrap_or(false),
                 hooks: Hooks::parse(it, &callbacks),
                 callbacks,
                 unsupported,

@@ -33,6 +33,7 @@ impl Battle {
                 let ab = self.dex.ab(self.sides[s].mons[oi].ability);
                 let regen_ident = self.name(p);
                 let mut regen_line: Option<String> = None;
+                let regen_shared = self.cfg.log_side.map(|ls| ls as usize != s).unwrap_or(false);
                 {
                     let m = &mut self.sides[s].mons[oi];
                     match ab {
@@ -42,7 +43,7 @@ impl Battle {
                                 m.hp += h;
                                 if h > 0 {
                                     // Pinned champions regenerator: a silent heal line.
-                                    regen_line = Some(format!("|-heal|{}|{}|[from] ability: Regenerator|[silent]", regen_ident, Self::hp_text_mon(m)));
+                                    regen_line = Some(format!("|-heal|{}|{}|[from] ability: Regenerator|[silent]", regen_ident, if regen_shared { Self::hp_text_shared_mon(m) } else { Self::hp_text_mon(m) }));
                                 }
                             }
                         }

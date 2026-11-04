@@ -99,8 +99,11 @@ changing the state format or the outcome features.
 | damage, every ability and item forced | not run | 4020 / 4020 exact |
 | turn outcomes | 543 / 604 scenarios consistent (61 flagged) | 1810 / 1810 (seed 30), 1784 / 1784 (seed 20), 1311 / 1311 (seed 10), 1280 / 1280 (seed 11), 440 / 440 (seed 7) |
 | request legality | (no check) | 4793 / 4793 (seed 30), 4651 / 4651 (seed 20) decision points |
-| teams fully supported | 93.3 % (3362 / 3605) | 98.3 % (3545 / 3605) |
+| teams fully supported | 93.3 % (3362 / 3605) | 98.25 % (2588 / 2634) |
 | `cargo test --test parity` | | 1000 damage cases, 250 turn scenarios, 283 requests: all pass |
+
+Support figures are this track's pool (2,634 teams, `parity supported`); the 3362/3605
+"before" cell is the upstream vgczero pool this README was imported from.
 
 Engine speed (`bench 50000`, random legal play): about 17k games/s now vs
 18k games/s before this work (more mechanics simulated, more teams).
@@ -109,10 +112,9 @@ Focused turn runs (`--require`): Aegislash / Palafin forme changes, Pawmot
 (Revival Blessing), Weavile / Salazzle / Delphox (Pickpocket, Shell Bell,
 Magician), Lucario (Steel Beam): all consistent.
 
-Remaining unsupported (the team is reported unsupported, never simulated
-approximately): Dragon Darts, Ally Switch, Illusion, Instruct, Transform,
-Sleep Talk and a few rarer moves / abilities / items; `bench` prints the
-current list of blockers.
+Remaining unsupported (a team is reported unsupported, never simulated
+approximately); `bench` prints the current list of blockers. Ally Switch,
+Dragon Darts and Instruct are supported now.
 
 ## Known approximations
 

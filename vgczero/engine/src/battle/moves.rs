@@ -1129,11 +1129,16 @@ impl Battle {
         if mv.terrain != Terrain::None {
             ok = self.set_terrain(mv.terrain, p, false);
         }
-        // selfSwitch of a field move (Chilly Reception): only after the move succeeded.
-        if ok && mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
+        // selfSwitch of a field move (Chilly Reception). Pinned runMoveEffects lets the
+        // selfSwitch branch override the move's own result: with a switch-in available the move
+        // counts as done even when the weather was already up, so it neither fails
+        // (`-fail`/`[still]`) nor skips the switch; without one it does fail (`didSomething`
+        // stays false), exactly as pinned.
+        if mv.self_switch == 1 && self.is_live(p) && self.sides[p.s()].bench_available() > 0 {
             let m = self.mm(p);
             m.vol.switch_flag = true;
             m.vol.switch_move = am.id;
+            ok = true;
         }
         match am.fx {
             MoveFx::Haze => {
@@ -3747,6 +3752,39 @@ mod tests {
         b.mm(p).vol.chilly_reception = true;
         b.run_residual();
         assert!(!b.m(p).vol.chilly_reception);
+    }
+
+    /// Pinned runMoveEffects selfSwitch branch: Chilly Reception with the weather already up does
+    /// not fail while a switch-in is available -- it flags the switch instead. With no bench the
+    /// same move fails (didSomething stays false).
+    #[test]
+    fn chilly_reception_switches_when_the_weather_is_already_up() {
+        setup();
+        let chilly = || json!({"species": "slowkinggalar", "ability": "regenerator", "item": "",
+            "moves": ["chillyreception", "tackle"], "stats": [207, 95, 115, 140, 120, 30],
+            "types": ["Poison", "Psychic"], "weightkg": 79.5, "level": 50});
+        let bench = json!({"species": "snorlax", "ability": "thickfat", "item": "", "moves": ["tackle"],
+            "stats": [200, 110, 65, 65, 110, 30], "types": ["Normal"], "weightkg": 460.0, "level": 50});
+        let foe = team(vec![]);
+        let mid = dex().move_id("chillyreception").unwrap();
+
+        // With a bench the move succeeds and flags a switch even though snow was already up.
+        let mut b = fielded(&team(vec![chilly(), bench]), &foe, 5);
+        let p = Pos::new(0, 0);
+        b.sides[0].mons[1].brought = true;
+        b.set_weather(Weather::Snow, p, false);
+        let mut am = b.make_active_move(p, mid, 0, false);
+        assert!(b.use_move_inner(p, &mut am, Some(p), 0), "no fail while a switch-in is available");
+        assert!(b.m(p).vol.switch_flag);
+        assert_eq!(b.m(p).vol.switch_move, mid);
+
+        // No bench: the same move fails and does not flag a switch.
+        let mut b2 = fielded(&team(vec![chilly()]), &foe, 5);
+        let p2 = Pos::new(0, 0);
+        b2.set_weather(Weather::Snow, p2, false);
+        let mut am2 = b2.make_active_move(p2, mid, 0, false);
+        assert!(!b2.use_move_inner(p2, &mut am2, Some(p2), 0), "fails with no switch-in");
+        assert!(!b2.m(p2).vol.switch_flag);
     }
 
     /// Pinned conditions.ts lockedmove: the first Outrage locks for a drawn 2 or 3 true turns

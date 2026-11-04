@@ -120,7 +120,7 @@ impl Battle {
                 return Err(format!("unsupported team: {:?}", t.unsupported));
             }
         }
-        let cfg = BattleConfig { turn_limit: 1000, ally_damage_targeting: true, log: true, sheets: [false, false] };
+        let cfg = BattleConfig { turn_limit: 1000, ally_damage_targeting: true, log: true, sheets: [false, false], log_side: None };
         let mut bt = Battle::new([&teams[0], &teams[1]], seed, cfg);
         bt.turn = i(v, "turn") as u16;
         let phase = s(v, "phase");

@@ -244,7 +244,11 @@ function main() {
 		for (const [k, a, b] of f.stateDiff) console.log(`      ${k}: showdown ${a} engine ${b}`);
 	}
 	if (DUMP) fs.writeFileSync(DUMP, JSON.stringify(failures, null, 1));
-	process.exitCode = counts.state + counts.draws ? 1 : 0;
+	// A --log run must also fail on channel divergence, not only on state/draw divergence:
+	// the state and draws can match while tracker-relevant lines (item use, heals, Haze, ...)
+	// differ, which is exactly what the channel comparison is there to catch.
+	const logDiff = LOGCMP ? logStats.diff : 0;
+	process.exitCode = counts.state + counts.draws + logDiff ? 1 : 0;
 }
 
 main();

@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use crate::dex::{dex, read_json, AbilityId, ItemId, MoveId, SpeciesId, NONE};
+use crate::kinds::MoveFx;
 use crate::types::Type;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -195,6 +196,19 @@ pub fn set_support(set: &SetSpec) -> Vec<String> {
     for r in &d.item(set.item).unsupported {
         why.push(r.clone());
     }
+    // Fling's held item decides the effect, and the engine models only pinned's status/volatile
+    // branch (`data/moves.ts` fling.onPrepareHit): a berry makes the *target* eat it, and an
+    // `item.fling.effect` item (White/Mental Herb) applies a scripted effect on hit. Neither is
+    // implemented, so a set that would fling such an item must not claim support.
+    if set.moves[..set.n_moves as usize].iter().any(|&m| d.mv(m).fx == MoveFx::Fling) {
+        let item = d.item(set.item);
+        if item.is_berry {
+            why.push(format!("fling with berry {}", item.id));
+        }
+        if item.fling_effect {
+            why.push(format!("fling with {} effect", item.id));
+        }
+    }
     why
 }
 
@@ -221,4 +235,32 @@ pub fn load_teams(path: &str) -> Result<Vec<TeamSpec>, String> {
     let v = read_json(path)?;
     let arr = v.get("teams").and_then(|x| x.as_array()).ok_or("teams file: no 'teams'")?;
     Ok(arr.iter().map(parse_team).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dex::load_dex;
+
+    fn set(species: &str, ability: &str, item: &str, moves: &[&str]) -> SetSpec {
+        let m = serde_json::json!({"species": species, "ability": ability, "item": item, "moves": moves});
+        let mut why = vec![];
+        parse_set(&m, &mut why)
+    }
+
+    /// A set that would fling a berry or an `item.fling.effect` item must be unsupported: the engine
+    /// models only the status/volatile branch, so it cannot run those faithfully.
+    #[test]
+    fn fling_with_an_unmodeled_item_is_unsupported() {
+        load_dex(&crate::data_path("dex.json.gz")).unwrap();
+        let berry = set("sneasler", "poisontouch", "sitrusberry", &["fling", "closecombat"]);
+        assert!(set_support(&berry).iter().any(|r| r.starts_with("fling with berry")), "{:?}", set_support(&berry));
+        let herb = set("sneasler", "poisontouch", "whiteherb", &["fling"]);
+        assert!(set_support(&herb).iter().any(|r| r.contains("whiteherb effect")), "{:?}", set_support(&herb));
+        // King's Rock (volatile flinch) is modeled; a berry held without Fling is fine.
+        let kings = set("sneasler", "poisontouch", "kingsrock", &["fling"]);
+        assert!(!set_support(&kings).iter().any(|r| r.starts_with("fling with")), "{:?}", set_support(&kings));
+        let no_fling = set("sneasler", "poisontouch", "sitrusberry", &["closecombat"]);
+        assert!(!set_support(&no_fling).iter().any(|r| r.starts_with("fling with")), "{:?}", set_support(&no_fling));
+    }
 }

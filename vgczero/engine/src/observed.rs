@@ -212,7 +212,7 @@ pub fn battle_from_snapshot(v: &Value, seed: u64) -> Result<Battle, String> {
         teams.push(TeamSpec { name: String::new(), mons: sets, unsupported });
     }
     let sheets = [bo(&sides[0], "sheet_open"), bo(&sides[1], "sheet_open")];
-    let cfg = BattleConfig { turn_limit: 1000, ally_damage_targeting: false, log: false, sheets };
+    let cfg = BattleConfig { turn_limit: 1000, ally_damage_targeting: false, log: false, sheets, log_side: None };
     let mut b = Battle::new([&teams[0], &teams[1]], seed, cfg);
     b.turn = u(v, "turn").max(1) as u16;
     // Field.
