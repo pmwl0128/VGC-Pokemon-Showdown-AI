@@ -12,6 +12,8 @@
 > `teams.json.gz`, `FAST_ENGINE_DATA` overrides); `showdown/export_dex.js`, `damage.js` and
 > `turns.js` run on a built Showdown (`PS_DIR`); `exact.js` and the whitelist test in
 > `engine/src/battle/ties.rs` need the Quark Drive repository's patched oracle and receipts;
+> `track.js`, `vocab.js`, `channel.js` and `episode.js` also require that repository's training
+> environment. Tracker and encoder tests require fixtures generated there;
 > `compile_teams.js` reads that repository's prepared team pools; the Python training stack
 > below has not been re-run against this engine.
 
